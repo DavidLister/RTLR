@@ -18,10 +18,11 @@ logger = logging.getLogger("RTLR.srs830")
 
 
 class SRS830Handler:
-    def __init__(self, data_queue, serial_port=None):
+    def __init__(self, data_queue, command_queue, serial_port=None):
         self.p = multiprocessing.Process(target=self.run)
         self.logger = logging.getLogger("RTLR.srs830.SRS830Handler")
-        self.outQueue = data_queue
+        self.queue_data_out = data_queue
+        self.queue_commands_in = command_queue
         self.state = common.SRS830_STATE_INIT
 
         # Serial Port parameters
@@ -36,6 +37,7 @@ class SRS830Handler:
         self.flagCloseSerialPort = False
 
         # Start the process!
+        self.i = 0
         self.p.start()
 
     def run(self):
@@ -45,15 +47,13 @@ class SRS830Handler:
         # Ensure no variables are called before definition
         start_time = time.time()
 
-        i = 0
         over = False
         while not over:
-            i += 1
-            self.logger.debug(f"Iteration {i}")
+            self.i += 1
+            self.logger.debug(f"Iteration {self.i}")
             self.logger.debug(f"Current state is {self.state}")
 
             match self.state:
-
                 case common.SRS830_STATE_INIT:
                     self.state = common.SRS830_STATE_WAITING_FOR_SERIAL_PORT
 
@@ -80,7 +80,7 @@ class SRS830Handler:
                     # todo: Transfer data from SRS830
 
                     # Put data to queue
-                    self.outQueue.put([start_time, i])  # Placeholder
+                    self.queue_data_out.put([start_time, self.i])  # Placeholder
 
                     self.state = common.SRS830_STATE_RUN_CAPTURING_DATA
                     # todo: if statement to raise flagSerialError
@@ -91,8 +91,34 @@ class SRS830Handler:
                 case _:
                     self.logger.error("Fallback case hit, killing srs830 thread")
 
-            # Check end conditions
+            command = None
+            if not self.queue_commands_in.empty():
+                command = self.queue_commands_in.get()
+                self.logger.info(f"Received command {command}")
+
+            match command:
+                case None:
+                    pass
+
+                case common.SRS830_COMMAND_RAISE_END_FLAG:
+                    self.logger.info(f"Raising the end flag on iteration {self.i}")
+                    self.flagEnd = True
+
+                case common.SRS830_COMMAND_SET_SERIAL_PORT:
+                    port = self.queue_commands_in.get()
+                    if self.state == common.SRS830_STATE_WAITING_FOR_SERIAL_PORT and not self.serialPortDefined:
+                        self.serialPort = port
+                        self.logger.info(f"Setting serial port to {self.serialPort}")
+                        self.serialPortDefined = True
+
+                case common.SRS830_COMMAND_CLOSE_SERIAL_PORT:
+                    self.flagCloseSerialPort = True
+
+                case _:
+                    logger.error(f"Error - Command not handled properly {command}")
+
             if self.flagEnd:
+                self.logger.info("Changing state to ending")
                 self.state = common.SRS830_STATE_RUN_ENDING
 
             if self.flagSerialError:
@@ -108,26 +134,9 @@ class SRS830Handler:
 
     def end(self):
         self.logger.info("Ending SRS830Handler")
+        self.queue_data_out.close()
+        self.queue_commands_in.close()
         self.p.close()
 
     def join(self, timeout=None):
         self.p.join(timeout)
-
-    def serial_port_close(self):
-        if self.state == common.SRS830_STATE_RUN_CAPTURING_DATA or \
-                self.state == common.SRS830_STATE_RUN_TRANSFERRING_DATA:
-            self.flagSerialError = True
-            return True
-        return False
-
-    def serial_port_add(self, port):
-        if self.state == common.SRS830_STATE_WAITING_FOR_SERIAL_PORT and not self.serialPortDefined:
-            self.serialPort = port
-            self.logger.info(f"Setting serial port to {self.serialPort}")
-            self.serialPortDefined = True
-            return True
-        else:
-            return False
-
-    def raise_end_flag(self):
-        self.flagEnd = True
