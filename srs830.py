@@ -8,14 +8,15 @@
 # David Lister
 # July 2023
 
-import multiprocessing
+##import multiprocessing
 import os
 import time
 import logging
 import datetime
 import serial
-
+import threading
 import common
+import numpy as np
 
 logger = logging.getLogger("RTLR.srs830")
 
@@ -61,14 +62,15 @@ def save_csv(t, r, theta, fname):
 
 
 class SRS830Handler:
-    def __init__(self, data_queue, command_queue, serial_port=None):
-        self.p = multiprocessing.Process(target=self.run)
+    def __init__(self, data_queue, command_queue, run_name, run_dir, serial_port=None):
+##        self.p = multiprocessing.Process(target=self.run)
+        self.p = threading.Thread(target=self.run)
         self.logger = logging.getLogger("RTLR.srs830.SRS830Handler")
+        self.run_name = run_name
+        self.run_dir = run_dir
         self.queue_data_out = data_queue
         self.queue_commands_in = command_queue
         self.state = common.SRS830_STATE_INIT
-        self.run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "---ADD_RUN_INFO_HERE"
-        self.run_dir = os.path.join(common.DATA_SUBPATH, self.run_name)
 
         if common.SRS830_SAVE_EACH_CAPTURE:
             os.makedirs(self.run_dir)
@@ -103,20 +105,23 @@ class SRS830Handler:
         over = False
         while not over:
             self.i += 1
-            self.logger.debug(f"Iteration {self.i}")
-            self.logger.debug(f"Current state is {self.state}")
+##            self.logger.debug(f"Iteration {self.i}")
+##            self.logger.debug(f"Current state is {self.state}")
 
             match self.state:
                 case common.SRS830_STATE_INIT:
+                    self.logger.info("SRS830 Process Initialized")
                     self.state = common.SRS830_STATE_WAITING_FOR_SERIAL_PORT
 
                 case common.SRS830_STATE_WAITING_FOR_SERIAL_PORT:
                     if time.time() - start_time >= 10:
+                        start_time = time.time()
                         self.logger.info(f"Waiting for serial port definition. Thread cycle {self.i}")
                         time.sleep(9)  # Slow down if sitting idle
+                        
 
-                    self.state = common.SRS830_STATE_RUN_CAPTURING_DATA  # temp
                     if self.serialPortDefined:
+                        self.logger.info("Attempting to connect to serial port.")
                         self.serialPortDefined = False
                         self.ser = serial.Serial(self.serialPort,
                                                  timeout=common.SRS830_TIMEOUT_S,
@@ -128,14 +133,14 @@ class SRS830Handler:
                             self.logger.info("Communication with SRS830 verified! Configuring instrument.")
                             send_command(self.ser, "*RST")
                             send_command(self.ser, "FMOD 1")  # Internal Freq reference
-                            send_command(self.ser, "FREQ 321")  # Frequency 321 kHz
+                            send_command(self.ser, "FREQ 2345")  # Frequency 321 kHz
                             send_command(self.ser, "SLVL 5")  # Amplitude to 5V RMS
                             send_command(self.ser, "ISRC 0")  # Open ended voltage input
                             send_command(self.ser, "IGND 1")  # Ground the PD
                             send_command(self.ser, "ICPL 0")  # AC couple the input
                             send_command(self.ser, "RMOD 1")  # Normal reserve
-                            send_command(self.ser, "SENS 22")  # d=22 Set gain to XmV range (higher number is higher range)
-                            send_command(self.ser, "OFLT 6")  # Set time constant to 3ms (higher number is larger time constant)
+                            send_command(self.ser, "SENS 24")  # Set gain to XmV range (higher number is higher range)
+                            send_command(self.ser, "OFLT 4")  # Set time constant to 3ms (higher number is larger time constant)
                             send_command(self.ser, "DDEF 1,1,0")  # Set ch1 display to R
                             send_command(self.ser, "DDEF 2,1,0")  # Set ch2 display to theta
                             send_command(self.ser, "SRAT 13")  # Sets capture rate to 512Hz
@@ -172,16 +177,23 @@ class SRS830Handler:
                         send_command(self.ser, "SPTS ?")  # Request number of stored points
                         points = int(capture_until_eol(self.ser))
 
-                        # Transfer data
+                        # R data:
                         send_command(self.ser, f"TRCA ? 1, 0, {points}")
                         data_r = capture_until_eol(self.ser)
-                        send_command(self.ser, f"TRCA ? 2, 0, {points}")
-                        data_theta = capture_until_eol(self.ser)
+                        data_r = np.array([float(d) for d in str(data_r, encoding='utf-8').split(',')[:-1]])
+                        timebase = np.array([n / common.SRS830_CAPTURE_RATE_HZ for n in range(len(data_r))])
 
-                        # Process data
-                        data_r = [float(d) for d in str(data_r, encoding='utf-8').split(',')[:-1]]
-                        data_theta = [float(d) for d in str(data_theta, encoding='utf-8').split(',')[:-1]]
-                        timebase = [n / common.SRS830_CAPTURE_RATE_HZ for n in range(len(data_r))]
+                        # Theta - if needed
+                        if common.SRS830_CAPTURE_PHASE:
+                            send_command(self.ser, f"TRCA ? 2, 0, {points}")
+                            data_theta = capture_until_eol(self.ser)
+                            data_theta = np.array([float(d) for d in str(data_theta, encoding='utf-8').split(',')[:-1]])
+
+                        else:
+                            data_theta = np.zeros(timebase.shape)
+                        
+                        
+                        
 
                         # Put data to queue
                         self.queue_data_out.put([start_time, (timebase, data_r, data_theta)])
@@ -192,6 +204,8 @@ class SRS830Handler:
                             save_csv(timebase, data_r, data_theta, os.path.join(self.run_dir, fname))
 
                     else:
+                        if not self.queue_data_out.empty():
+                            logger.warning(f"Queue is not empty, data could be accumulating! Queue size is {self.queue_data_out.qsize()}")
                         self.queue_data_out.put([start_time, (self.i, self.i, self.i)])
 
                     # Back to capturing
@@ -248,9 +262,9 @@ class SRS830Handler:
         self.logger.info("Ending SRS830Handler")
         if self.ser is not None:
             self.ser.close()
-        self.queue_data_out.close()
-        self.queue_commands_in.close()
-        self.p.close()
+##        self.queue_data_out.close()
+##        self.queue_commands_in.close()
+##        self.p.close()
 
     def join(self, timeout=None):
         self.p.join(timeout)
