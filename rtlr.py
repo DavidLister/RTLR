@@ -135,6 +135,7 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "---ADD_RUN_INFO_HERE"
     run_dir = os.path.join(common.DATA_SUBPATH, run_name)
+    os.makedirs(run_dir)
     queue_srs_to_analysis = queue.Queue()
     queue_srs_commands = queue.Queue()
 

@@ -71,10 +71,7 @@ class SRS830Handler:
         self.queue_data_out = data_queue
         self.queue_commands_in = command_queue
         self.state = common.SRS830_STATE_INIT
-
-        if common.SRS830_SAVE_EACH_CAPTURE:
-            os.makedirs(self.run_dir)
-
+        
         # Serial Port parameters
         self.serialPort = serial_port
         self.serialPortDefined = False
