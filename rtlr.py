@@ -74,14 +74,19 @@ class MainWindow(QMainWindow):
 
         self.time = []
         self.reflectance = []
+        self.ch2 = []
         self.save_file_name = os.path.join(self.run_dir, "Reflectance.csv")
 
         self.raw_time = []
         self.raw_voltage = []
 
         if common.SAVE_CALCULATED_REFLECTANCE:
+            if common.PLOT_CH2:
+                out = "Time (s),Reflectance (v),CH2\n"
+            else:
+                out = "Time (s),Reflectance (v)\n"
             with open(self.save_file_name, 'w') as f:
-                f.write("Time (s),Reflectance (v)\n")
+                f.write(out)
         
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_graphs)
@@ -98,6 +103,7 @@ class MainWindow(QMainWindow):
                 self.time.append(data[0] - self.init_time)
                 self.raw_time = data[1][0]
                 self.raw_voltage = data[1][1]
+                self.raw_ch2 = data[1][2]
 
                 r = self.raw_voltage
                 mean = np.mean(r)
@@ -113,10 +119,16 @@ class MainWindow(QMainWindow):
                         self.reflectance.append(upper_median)
                         print(f"Average Value Calculated: t={data[0] - self.init_time} R={upper_median}")
             
+                if common.PLOT_CH2:
+                    self.ch2.append(np.abs(np.mean(self.raw_ch2)))
 
                 if common.SAVE_CALCULATED_REFLECTANCE:
+                    if common.PLOT_CH2:
+                        out = f"{self.time[-1]},{self.reflectance[-1]},{self.ch2[-1]}\n"
+                    else:
+                        out = f"{self.time[-1]},{self.reflectance[-1]}\n"
                     with open(self.save_file_name, 'a') as f:
-                        f.write(f"{self.time[-1]},{self.reflectance[-1]}\n")
+                        f.write(out)
         
 
 
@@ -129,6 +141,8 @@ class MainWindow(QMainWindow):
         if data_added:
             self.plot_reflectance.clear()
             self.plot_reflectance.plot(self.time, self.reflectance, pen=self.main_pen)
+            if common.PLOT_CH2:
+                self.plot_reflectance.plot(self.time, self.ch2, pen=self.fit_pen)
 
             self.plot_raw.clear()
             self.plot_raw.plot(self.raw_time, self.raw_voltage, pen=self.main_pen)

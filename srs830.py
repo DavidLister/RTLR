@@ -130,8 +130,8 @@ class SRS830Handler:
                             self.logger.info("Communication with SRS830 verified! Configuring instrument.")
                             send_command(self.ser, "*RST")
                             send_command(self.ser, "FMOD 1")  # Internal Freq reference
-                            send_command(self.ser, "FREQ 2345")  # Frequency 321 kHz
-                            send_command(self.ser, "SLVL 5")  # Amplitude to 5V RMS
+                            send_command(self.ser, "FREQ 2345")  # Frequency 2.345 kHz, quiet background here
+                            send_command(self.ser, "SLVL 4.33")  # Amplitude to 4.33V RMS, the max prior to saturation on the SFU MOCVD system.
                             send_command(self.ser, "ISRC 0")  # Open ended voltage input
                             send_command(self.ser, "IGND 1")  # Ground the PD
                             send_command(self.ser, "ICPL 0")  # AC couple the input
@@ -139,7 +139,7 @@ class SRS830Handler:
                             send_command(self.ser, "SENS 24")  # Set gain to XmV range (higher number is higher range)
                             send_command(self.ser, "OFLT 4")  # Set time constant to 3ms (higher number is larger time constant)
                             send_command(self.ser, "DDEF 1,1,0")  # Set ch1 display to R
-                            send_command(self.ser, "DDEF 2,1,0")  # Set ch2 display to theta
+                            send_command(self.ser, "DDEF 2,3,0")  # Set ch2 display to Aux 3
                             send_command(self.ser, "SRAT 13")  # Sets capture rate to 512Hz
                             send_command(self.ser, "SEND 0")  # Sets to single shot capture
                             send_command(self.ser, "TSTR 0")  # Disables hardware trigger
@@ -171,6 +171,7 @@ class SRS830Handler:
                 case common.SRS830_STATE_RUN_TRANSFERRING_DATA:
                     self.logger.info(f"Transferring data, thread cycle {self.i}")
                     if not common.SRS830_FAKE_SERIAL:
+                        self.logger.info("Capturing CH1")
                         send_command(self.ser, "SPTS ?")  # Request number of stored points
                         points = int(capture_until_eol(self.ser))
 
@@ -180,25 +181,26 @@ class SRS830Handler:
                         data_r = np.array([float(d) for d in str(data_r, encoding='utf-8').split(',')[:-1]])
                         timebase = np.array([n / common.SRS830_CAPTURE_RATE_HZ for n in range(len(data_r))])
 
-                        # Theta - if needed
-                        if common.SRS830_CAPTURE_PHASE:
+                        # CH2 - if needed
+                        if common.SRS830_CAPTURE_CH2:
+                            self.logger.info("Capturing CH2")
                             send_command(self.ser, f"TRCA ? 2, 0, {points}")
-                            data_theta = capture_until_eol(self.ser)
-                            data_theta = np.array([float(d) for d in str(data_theta, encoding='utf-8').split(',')[:-1]])
+                            data_ch2 = capture_until_eol(self.ser)
+                            data_ch2 = np.array([float(d) for d in str(data_ch2, encoding='utf-8').split(',')[:-1]])
 
                         else:
-                            data_theta = np.zeros(timebase.shape)
+                            data_ch2 = np.zeros(timebase.shape)
                         
                         
                         
 
                         # Put data to queue
-                        self.queue_data_out.put([start_time, (timebase, data_r, data_theta)])
+                        self.queue_data_out.put([start_time, (timebase, data_r, data_ch2)])
 
                         # Save data
                         if common.SRS830_SAVE_EACH_CAPTURE:
                             fname = str(self.i) + "--" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                            save_csv(timebase, data_r, data_theta, os.path.join(self.run_dir, fname))
+                            save_csv(timebase, data_r, data_ch2, os.path.join(self.run_dir, fname))
 
                     else:
                         if not self.queue_data_out.empty():
@@ -262,6 +264,5 @@ class SRS830Handler:
 ##        self.queue_data_out.close()
 ##        self.queue_commands_in.close()
 ##        self.p.close()
-
     def join(self, timeout=None):
         self.p.join(timeout)
