@@ -104,8 +104,15 @@ class MainWindow(QMainWindow):
                 stdev = np.std(r)
                 upper_median = np.median(r[r > mean + stdev/2])
                 lower_median = np.median(r[r < mean - stdev/2])
-                self.reflectance.append(upper_median - lower_median)
-                print(f"Value Calculated: t={data[0] - self.init_time} R={upper_median - lower_median}")
+                match common.CALC_TYPE:
+                    case common.CALC_PEAK_TO_PEAK:
+                        self.reflectance.append(upper_median - lower_median)
+                        print(f"Pk-Pk Value Calculated: t={data[0] - self.init_time} R={upper_median - lower_median}")
+
+                    case common.CALC_UPPER_MEDIAN:
+                        self.reflectance.append(upper_median)
+                        print(f"Average Value Calculated: t={data[0] - self.init_time} R={upper_median}")
+            
 
                 if common.SAVE_CALCULATED_REFLECTANCE:
                     with open(self.save_file_name, 'a') as f:
