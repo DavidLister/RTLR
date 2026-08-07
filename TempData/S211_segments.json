@@ -1,0 +1,9 @@
+{
+  "substrate": "Al2O3",
+  "segments": [
+    {"kind": "substrate", "t_start": 0, "t_end": 2600, "material": null, "temp_c": 1050},
+    {"kind": "deposition", "t_start": 2750, "t_end": 3200, "material": "LT GaN", "temp_c": 550},
+    {"kind": "etch", "t_start": 3230, "t_end": 3360, "material": "LT GaN", "temp_c": 1000},
+    {"kind": "deposition", "t_start": 3400, "t_end": 8350, "material": "HT GaN", "temp_c": 1050}
+  ]
+}
