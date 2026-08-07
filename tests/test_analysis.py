@@ -132,6 +132,32 @@ def test_roughening_onset_detection():
     assert post[-1].sigma_nm > 10.0
 
 
+def test_deposition_roughening_alarm():
+    # healthy fringes for 2 fringes, then roughness ramps up and collapses
+    # the envelope -> ROUGHENING must flag during the collapse, not before
+    N, rv = ht_gan_setup()
+    G, A = 0.25, 0.27
+    t = np.arange(0, 5800, 8.2)
+    t_onset = 2200.0
+    sigma_t = np.where(t < t_onset, 2.0, 2.0 + 0.025 * (t - t_onset))
+    d = G * t
+    R = analysis.model_reflectance(d, N, rv, sigma_t, 0.0, WL)
+    v = A * R + RNG.normal(0, 0.0006, len(t))
+    seg = analysis.Segment(kind="deposition", t_start=0, t_end=5800,
+                           material="HT GaN", temp_c=1050)
+    ana = analysis.SegmentAnalyzer(seg, A, "Al2O3")
+    feed(ana, t, v)
+    def detected(r):
+        return "ROUGHENING" in r.flags or "ENVELOPE_DECAY" in r.flags
+    flagged = [r.t for r in ana.results if detected(r)]
+    clean = [r for r in ana.results if r.t < t_onset]
+    assert flagged, "roughening was never flagged"
+    assert min(flagged) > t_onset, "flagged before roughening started"
+    assert sum(detected(r) for r in clean) == 0
+    # the confirmed alarm must also fire eventually
+    assert any("ROUGHENING" in r.flags for r in ana.results)
+
+
 def test_no_branch_jump_on_decimated_data():
     N, rv = ht_gan_setup()
     G, A = 0.44, 0.30

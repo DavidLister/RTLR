@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.signal import find_peaks
 
 import materials
 
@@ -63,12 +64,23 @@ MAX_WINDOW_POINTS = 600
 MIN_FIT_POINTS = 8
 DEFAULT_RATE_GUESS_NM_S = {"deposition": 0.4, "etch": -0.005}
 
-# Roughening-onset heuristics. The alarm keys on a RISING sigma trend, not
-# absolute level: on real data sigma also absorbs benign scale losses
-# (alignment/bowing drift), so absolute-level alarms would false-trigger.
-ROUGHNESS_ALARM_NM = 12.0
-ROUGHNESS_TREND_WINDOW_S = 400.0
-ROUGHNESS_TREND_ALARM_NM_S = 0.01
+# Roughening-onset heuristics, deliberately fit-independent: fitted sigma
+# also absorbs benign scale losses (alignment/bowing drift) and its split
+# against the contrast-damping term is not stable enough to alarm on.
+# Detection tracks EWMA envelopes (time constant ~1 fringe) of the signal
+# mean and oscillation amplitude. Roughening = fringe amplitude has halved
+# from its running maximum AND the mean sits well below where it was when
+# fringes were strongest AND the mean is still falling. Anchoring the mean
+# comparison at the amplitude maximum makes coalescence transients (which
+# have large amplitude but a RISING mean afterwards) immune to false alarms.
+ROUGH_AMP_FRACTION = 0.5          # amplitude vs its running max
+ROUGH_MEAN_FRACTION = 0.85        # mean vs mean at amplitude max
+ROUGHENING_PERSIST_POINTS = 3     # consecutive detections before flagging
+
+# Early soft warning (ENVELOPE_DECAY): three consecutive fringe peaks, each
+# at least this much below the previous. Fires ~1-2 fringes before the
+# confirmed ROUGHENING alarm; healthy runs decline ~1-3% per fringe.
+PEAK_DECAY_RATIO = 0.90
 SUBSTRATE_CROSS_FRACTION = 0.93  # signal below this fraction of the bare-substrate level
 
 # Rate is only identifiable while the window contains visible fringe contrast
@@ -253,6 +265,13 @@ class SegmentAnalyzer:
         self._sigma_initialized = not start_rough
         self._reinit_block_until = 0     # results-count gate for multi-start
         self._uncertain_streak = 0       # consecutive RATE_UNCERTAIN results
+        self._roughening_streak = 0      # consecutive envelope-decline detections
+        self._env_mean = None            # EWMA envelope state for the detector
+        self._env_amp = 0.0
+        self._env_amp_max = 0.0
+        self._env_mean_at_amp_max = None
+        self._env_fringe_ref = None      # fringe clock frozen at amplitude max
+        self._env_hist = []              # (t, env_mean) history for the falling test
 
         self.t = []
         self.v = []
@@ -449,8 +468,14 @@ class SegmentAnalyzer:
         resid_rms = float(np.sqrt(np.mean((fit.fun[:-1]) ** 2)))
 
         flags = []
-        if sigma_now > ROUGHNESS_ALARM_NM and self._sigma_trend(t) > ROUGHNESS_TREND_ALARM_NM_S:
+        if self._envelope_declining(t):
+            self._roughening_streak += 1
+        else:
+            self._roughening_streak = 0
+        if self._roughening_streak >= ROUGHENING_PERSIST_POINTS:
             flags.append("ROUGHENING")
+        elif self.segment.kind == "deposition" and self._peak_decay_warning():
+            flags.append("ENVELOPE_DECAY")
         # identifiability: the fitted model must show real fringe contrast in
         # this window, otherwise the rate is riding on nothing
         d_win = d_start + rate * (tw - tw[0])
@@ -483,15 +508,60 @@ class SegmentAnalyzer:
         self.results.append(result)
         return result
 
-    def _sigma_trend(self, t_now):
-        """Linear sigma trend (nm/s) over the recent results history."""
-        recent = [(r.t, r.sigma_nm) for r in self.results
-                  if r.t >= t_now - ROUGHNESS_TREND_WINDOW_S]
-        if len(recent) < 5:
-            return 0.0
-        tt = np.array([x[0] for x in recent])
-        ss = np.array([x[1] for x in recent])
-        return float(np.polyfit(tt - tt[0], ss, 1)[0])
+    def _envelope_declining(self, t_now):
+        """EWMA-envelope roughening detector - see the constants block.
+        The fringe clock is frozen at the amplitude maximum so a collapsed
+        rate estimate after washout cannot stall the filter, and 'falling'
+        is judged against half a fringe of history, not point-to-point."""
+        if len(self.t) < 2:
+            return False
+        v = self.v[-1]
+        dt = self.t[-1] - self.t[-2]
+        fringe_ref = self._env_fringe_ref or self._fringe_period_s()
+        alpha = float(np.clip(dt / fringe_ref, 0.0, 0.5))
+
+        if self._env_mean is None:
+            self._env_mean = v
+            self._env_amp = 0.0
+            return False
+        prev_mean = self._env_mean
+        self._env_mean += alpha * (v - self._env_mean)
+        self._env_amp += alpha * (abs(v - prev_mean) - self._env_amp)
+        self._env_hist.append((t_now, self._env_mean))
+        self._env_hist = [(t0, m) for (t0, m) in self._env_hist
+                          if t0 >= t_now - 3.0 * fringe_ref]
+        # require a bit of history before the running max is meaningful
+        if len(self.v) < MIN_FIT_POINTS * 2:
+            return False
+        if self._env_amp > self._env_amp_max:
+            self._env_amp_max = self._env_amp
+            self._env_mean_at_amp_max = self._env_mean
+            self._env_fringe_ref = self._fringe_period_s()
+
+        if self._env_amp_max <= 0 or self._env_mean_at_amp_max is None:
+            return False
+        past = [m for (t0, m) in self._env_hist if t0 <= t_now - 0.5 * fringe_ref]
+        falling = bool(past) and self._env_mean < past[-1]
+        return (self._env_amp < ROUGH_AMP_FRACTION * self._env_amp_max
+                and self._env_mean < ROUGH_MEAN_FRACTION * self._env_mean_at_amp_max
+                and falling)
+
+    def _peak_decay_warning(self):
+        """Early soft warning: three consecutive fringe peaks each
+        PEAK_DECAY_RATIO or more below the previous one."""
+        v = np.array(self.v)
+        tt = np.array(self.t)
+        if len(v) < 12:
+            return False
+        vs = np.convolve(v, np.ones(3) / 3.0, mode="same")
+        dt = float(np.median(np.diff(tt)))
+        dist = max(3, int(0.5 * self._fringe_period_s() / max(dt, 1e-6)))
+        prom = max(5.0 * _noise_estimate(v[-50:]), 0.05 * float(np.ptp(vs)))
+        peaks, _ = find_peaks(vs, distance=dist, prominence=prom)
+        if len(peaks) < 3:
+            return False
+        p1, p2, p3 = vs[peaks[-3]], vs[peaks[-2]], vs[peaks[-1]]
+        return p3 < PEAK_DECAY_RATIO * p2 and p2 < PEAK_DECAY_RATIO * p1
 
     def _post_onset_point(self, t):
         """After roughening onset in an etch segment the planar model is

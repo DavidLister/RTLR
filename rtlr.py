@@ -14,11 +14,12 @@ import time
 import datetime
 import os
 from PySide6 import QtGui, QtCore
-from PySide6.QtWidgets import QApplication, QMainWindow, QGridLayout, QWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QGridLayout, QWidget, QToolButton
 import pyqtgraph as pg
 import sys
 import common
 import srs830
+# analysis_panel (and scipy) are imported lazily on first caret expand
 
 
 logger = logging.getLogger("RTLR")
@@ -71,6 +72,17 @@ class MainWindow(QMainWindow):
         self.layout.addWidget(self.plot_reflectance, 0, 0, 3, 4)
         self.layout.addWidget(self.plot_raw, 3, 0, 3, 4)
 
+        # Analysis panel: collapsed caret by default; the panel (and the
+        # scipy-based fitting engine) is only created on first expand
+        self.analysis_panel = None
+        self.analysis_caret = QToolButton()
+        self.analysis_caret.setText("Analysis")
+        self.analysis_caret.setCheckable(True)
+        self.analysis_caret.setArrowType(QtCore.Qt.RightArrow)
+        self.analysis_caret.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.analysis_caret.toggled.connect(self.toggle_analysis_panel)
+        self.layout.addWidget(self.analysis_caret, 6, 0, 1, 1)
+
         self.widget = QWidget()
         self.widget.setLayout(self.layout)
         self.setCentralWidget(self.widget)
@@ -96,6 +108,17 @@ class MainWindow(QMainWindow):
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_graphs)
         self.timer.start(common.WINDOW_UPDATE_RATE_MS)
+
+    def toggle_analysis_panel(self, expanded):
+        self.analysis_caret.setArrowType(
+            QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
+        if self.analysis_panel is None and expanded:
+            from analysis_panel import AnalysisPanel
+            self.analysis_panel = AnalysisPanel(self.run_dir, self.plot_reflectance)
+            self.layout.addWidget(self.analysis_panel, 7, 0, 1, 4)
+            self.logger.info("Analysis panel created")
+        if self.analysis_panel is not None:
+            self.analysis_panel.setVisible(expanded)
 
     def update_graphs(self):
         data_added = False
@@ -138,6 +161,9 @@ class MainWindow(QMainWindow):
                 with open(self.save_file_name, 'a') as f:
                     f.write(row + "\n")
 
+            if self.analysis_panel is not None:
+                self.analysis_panel.feed(capture_time, reflectance, float(np.mean(raw_ch2)))
+
         if data_added:
             self.curve_reflectance.setData(self.time, self.reflectance)
             self.curve_raw.setData(self.raw_time, self.raw_voltage)
@@ -145,15 +171,27 @@ class MainWindow(QMainWindow):
             self.curve_upper_median.setData(ends, [self.upper_median] * 2)
             self.curve_lower_median.setData(ends, [self.lower_median] * 2)
 
+        if self.analysis_panel is not None and self.analysis_panel.isVisible():
+            self.analysis_panel.refresh()
+
 
 if __name__ == "__main__":
+    replay_file = sys.argv[1] if len(sys.argv) > 1 else common.RTLR_REPLAY_FILE
+    replay_speed = float(sys.argv[2]) if len(sys.argv) > 2 else common.RTLR_REPLAY_SPEED
+
     run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "---ADD_RUN_INFO_HERE"
     run_dir = os.path.join(common.DATA_SUBPATH, run_name)
     os.makedirs(run_dir, exist_ok=True)
     queue_srs_to_analysis = queue.Queue()
     queue_srs_commands = queue.Queue()
 
-    srs830_handler = srs830.SRS830Handler(queue_srs_to_analysis, queue_srs_commands, run_name, run_dir, serial_port=common.SRS830_COM_PORT)
+    if replay_file is not None:
+        import replay
+        srs830_handler = replay.ReplayHandler(queue_srs_to_analysis, queue_srs_commands,
+                                              run_name, run_dir,
+                                              replay_file=replay_file, speed=replay_speed)
+    else:
+        srs830_handler = srs830.SRS830Handler(queue_srs_to_analysis, queue_srs_commands, run_name, run_dir, serial_port=common.SRS830_COM_PORT)
 
     app = QApplication([])
 
@@ -163,6 +201,8 @@ if __name__ == "__main__":
 
     # Cleanup and close
     window.timer.stop()
+    if window.analysis_panel is not None:
+        window.analysis_panel.shutdown()
     srs830_handler.stop()
     srs830_handler.join(timeout=10)
     if srs830_handler.p.is_alive():

@@ -54,3 +54,9 @@ SRS830_SRAT_CODE = 13  # Sample rate code: 13 = 512 Hz, must match SRS830_CAPTUR
 SRS830_CAPTURE_RATE_HZ = 512
 
 SRS830_FAKE_SERIAL = False
+
+# Replay mode: set to a recorded Reflectance.csv path (or pass on the command
+# line: python rtlr.py <recorded.csv> [speed]) to feed a past run through the
+# live pipeline instead of talking to the instrument.
+RTLR_REPLAY_FILE = None
+RTLR_REPLAY_SPEED = 20.0
