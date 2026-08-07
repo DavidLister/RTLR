@@ -48,11 +48,11 @@ def capture_until_eol(con):
         dout += data
 
 
-def save_csv(t, r, theta, fname):
-    n = min(len(t), len(r), len(theta))  # Sometimes theta has fewer data points
-    out = "Time (s),R (V),Theta (degrees)\n"
+def save_csv(t, r, ch2, fname):
+    n = min(len(t), len(r), len(ch2))  # Sometimes ch2 has fewer data points
+    out = "Time (s),R (V),CH2\n"
     for i in range(n):
-        out += f"{t[i]},{r[i]},{theta[i]}\n"
+        out += f"{t[i]},{r[i]},{ch2[i]}\n"
 
     with open(fname, 'w') as f:
         f.write(out)
@@ -122,7 +122,7 @@ class SRS830Handler:
         send_command(self.ser, f"SENS {common.SRS830_SENS_CODE}")
         send_command(self.ser, f"OFLT {common.SRS830_OFLT_CODE}")
         send_command(self.ser, "DDEF 1,1,0")  # Set ch1 display to R
-        send_command(self.ser, "DDEF 2,1,0")  # Set ch2 display to theta
+        send_command(self.ser, f"DDEF {common.SRS830_DDEF_CH2}")  # Ch2 display source (theta or aux input)
         send_command(self.ser, f"SRAT {common.SRS830_SRAT_CODE}")
         send_command(self.ser, "SEND 0")  # Single shot capture
         send_command(self.ser, "TSTR 0")  # Disable hardware trigger
@@ -137,14 +137,14 @@ class SRS830Handler:
         data_r = parse_trca(capture_until_eol(self.ser))
         timebase = np.arange(len(data_r)) / common.SRS830_CAPTURE_RATE_HZ
 
-        # Theta - if needed
-        if common.SRS830_CAPTURE_PHASE:
+        # CH2 (theta or aux input, per SRS830_DDEF_CH2) - if needed
+        if common.SRS830_CAPTURE_CH2:
             send_command(self.ser, f"TRCA ? 2, 0, {points}")
-            data_theta = parse_trca(capture_until_eol(self.ser))
+            data_ch2 = parse_trca(capture_until_eol(self.ser))
         else:
-            data_theta = np.zeros(timebase.shape)
+            data_ch2 = np.zeros(timebase.shape)
 
-        return timebase, data_r, data_theta
+        return timebase, data_r, data_ch2
 
     def fake_data(self):
         # Synthesize a chopped square wave with noise so fake mode exercises the
@@ -153,9 +153,9 @@ class SRS830Handler:
         timebase = np.arange(n) / common.SRS830_CAPTURE_RATE_HZ
         chop = np.where(np.sin(2 * np.pi * 5.0 * timebase) > 0, self.fake_level, 0.1 * self.fake_level)
         data_r = chop + np.random.normal(0, 0.01, n)
-        data_theta = np.zeros(n)
+        data_ch2 = np.full(n, 0.5 + 0.1 * self.fake_level) + np.random.normal(0, 0.002, n)
         self.fake_level = max(0.2, self.fake_level + np.random.normal(0, 0.02))
-        return timebase, data_r, data_theta
+        return timebase, data_r, data_ch2
 
     def run(self):
         self.logger.info("Starting SRS830Handler")

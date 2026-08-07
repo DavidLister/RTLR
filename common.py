@@ -37,7 +37,13 @@ SRS830_TIMEOUT_S = 5  # Inter-byte timeout - only trips after the line goes sile
 SRS830_RETRY_DELAY_S = 5  # Delay between serial connection attempts
 SRS830_SETTLE_TIME_S = 5  # Wait after configuring the instrument
 SRS830_SAVE_EACH_CAPTURE = False
-SRS830_CAPTURE_PHASE = False
+
+# CH2 capture: records the SR830 channel-2 buffer alongside R and adds a CH2
+# column to Reflectance.csv. What CH2 physically is depends on SRS830_DDEF_CH2:
+# "2,1,0" = theta (default), "2,3,0" = Aux In 3, "2,4,0" = Aux In 4 (DC
+# photodiode / blackbody channel lives on an aux input).
+SRS830_CAPTURE_CH2 = False
+SRS830_DDEF_CH2 = "2,1,0"
 
 # Instrument configuration - single source of truth for experiment parameters
 SRS830_REF_FREQ_HZ = 2345  # Internal reference frequency

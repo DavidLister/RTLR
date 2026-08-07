@@ -1,4 +1,5 @@
 numpy
+scipy
 pyserial
 PySide6
 pyqtgraph

@@ -87,8 +87,11 @@ class MainWindow(QMainWindow):
         self.lower_median = None
 
         if common.SAVE_CALCULATED_REFLECTANCE:
+            header = "Time (s),Reflectance (V)"
+            if common.SRS830_CAPTURE_CH2:
+                header += ",CH2"
             with open(self.save_file_name, 'w') as f:
-                f.write("Time (s),Reflectance (V)\n")
+                f.write(header + "\n")
 
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_graphs)
@@ -99,7 +102,7 @@ class MainWindow(QMainWindow):
         while not self.data_queue.empty():
             data = self.data_queue.get_nowait()
             capture_time = data[0] - self.init_time
-            self.raw_time, self.raw_voltage, _theta = data[1]
+            self.raw_time, self.raw_voltage, raw_ch2 = data[1]
 
             r = self.raw_voltage
             mean = np.mean(r)
@@ -129,8 +132,11 @@ class MainWindow(QMainWindow):
             data_added = True
 
             if common.SAVE_CALCULATED_REFLECTANCE:
+                row = f"{capture_time},{reflectance}"
+                if common.SRS830_CAPTURE_CH2:
+                    row += f",{np.mean(raw_ch2)}"
                 with open(self.save_file_name, 'a') as f:
-                    f.write(f"{capture_time},{reflectance}\n")
+                    f.write(row + "\n")
 
         if data_added:
             self.curve_reflectance.setData(self.time, self.reflectance)
