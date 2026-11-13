@@ -61,13 +61,22 @@ def capture_binary(con, n_bytes):
     return bytes(dout)
 
 
-def read_buffer(con, channel, points):
+def read_buffer(con, channel, points, start=0):
     # TRCB returns IEEE-754 float32, little-endian, 4 bytes per point - 3.5x
     # fewer bytes than TRCA's ASCII (~14 B/pt), and the RS232 line is the
     # bottleneck. Matches TRCA to its 7 significant digits.
     # (TRCL is no faster and truncates after ~66 bytes over RS232 on fw 0.341.)
-    send_command(con, f"TRCB ? {channel}, 0, {points}")
+    send_command(con, f"TRCB ? {channel}, {start}, {points}")
     return np.frombuffer(capture_binary(con, 4 * points), dtype="<f4").astype(float)
+
+
+def append_raw_stream(fname, t, r, ch2):
+    # Continuous-capture raw log: absolute time (s since epoch), R (V), CH2 (V, sign-corrected)
+    new = not os.path.exists(fname)
+    with open(fname, "a") as f:
+        if new:
+            f.write("Time (s since epoch),R (V),CH2 (V)\n")
+        np.savetxt(f, np.column_stack([t, r, ch2]), fmt=["%.4f", "%.7g", "%.7g"], delimiter=",")
 
 
 def save_csv(t, r, ch2, fname):
@@ -150,9 +159,13 @@ class SRS830Handler:
         send_command(self.ser, f"OFLT {common.SRS830_OFLT_CODE}")
         send_command(self.ser, "DDEF 1,1,0")  # Set ch1 display to R
         send_command(self.ser, f"DDEF {common.SRS830_DDEF_CH2}")  # Ch2 display source (theta or aux input)
-        send_command(self.ser, f"SRAT {common.SRS830_SRAT_CODE}")
+        srat = common.SRS830_STREAM_SRAT_CODE if common.SRS830_STREAM else common.SRS830_SRAT_CODE
+        send_command(self.ser, f"SRAT {srat}")
         send_command(self.ser, "SEND 0")  # Single shot capture
         send_command(self.ser, "TSTR 0")  # Disable hardware trigger
+        # The failed front-panel knob drifts whichever reference parameter was
+        # set last, so set the phase last: R doesn't depend on phase.
+        send_command(self.ser, "PHAS 0")
         # Remote mode: front panel (incl. the drifting knob) is disabled while
         # the program runs, but the Local key still works as an escape hatch.
         send_command(self.ser, "LOCL 1")
@@ -173,6 +186,67 @@ class SRS830Handler:
             data_ch2 = np.zeros(timebase.shape)
 
         return timebase, data_r, data_ch2
+
+    def refresh_reference(self):
+        # Undo any knob drift; phase last so the knob keeps acting on phase
+        send_command(self.ser, f"FREQ {common.SRS830_REF_FREQ_HZ}")
+        send_command(self.ser, "PHAS 0")
+
+    def stream_start(self):
+        # (Re)start continuous storage from an empty buffer
+        send_command(self.ser, "PAUS")
+        self.refresh_reference()
+        send_command(self.ser, "REST")
+        send_command(self.ser, "STRT")
+        self.stream_t0 = time.time()
+        self.stream_nread = 0
+        self.stream_pending = (np.empty(0), np.empty(0))
+        self.stream_block_start = 0  # sample index of the first pending sample
+
+    def stream_read_new(self):
+        send_command(self.ser, "SPTS ?")
+        n = int(capture_until_eol(self.ser))
+        k = n - self.stream_nread
+        if k <= 0:
+            return
+        r = read_buffer(self.ser, 1, k, start=self.stream_nread)
+        if common.SRS830_CAPTURE_CH2:
+            ch2 = common.SRS830_CH2_SIGN * read_buffer(self.ser, 2, k, start=self.stream_nread)
+        else:
+            ch2 = np.zeros(k)
+        if common.SRS830_STREAM_SAVE_RAW:
+            t = self.stream_t0 + (self.stream_nread + np.arange(k)) / common.SRS830_STREAM_RATE_HZ
+            append_raw_stream(os.path.join(self.run_dir, "raw_stream.csv"), t, r, ch2)
+        self.stream_nread = n
+        self.stream_pending = (np.concatenate([self.stream_pending[0], r]), np.concatenate([self.stream_pending[1], ch2]))
+
+    def stream_emit(self, flush=False):
+        # Hand complete blocks (and on flush, a final block of at least half
+        # length) to the GUI in the same shape as a burst capture
+        rate = common.SRS830_STREAM_RATE_HZ
+        block = int(round(common.SRS830_STREAM_BLOCK_S * rate))
+        r, ch2 = self.stream_pending
+        while len(r) >= block or (flush and len(r) >= block // 2):
+            m = min(block, len(r))
+            start_time = self.stream_t0 + self.stream_block_start / rate
+            self.queue_data_out.put([start_time, (np.arange(m) / rate, r[:m], ch2[:m])])
+            r, ch2 = r[m:], ch2[m:]
+            self.stream_block_start += m
+        self.stream_pending = (r, ch2)
+
+    def stream_poll(self):
+        self.wait(common.SRS830_STREAM_POLL_S)
+        if self.event_end.is_set():
+            return
+        self.stream_read_new()
+        if self.stream_nread >= common.SRS830_STREAM_RESTART_PTS:
+            send_command(self.ser, "PAUS")
+            self.stream_read_new()
+            self.stream_emit(flush=True)
+            self.logger.info(f"Restarting stream buffer after {self.stream_nread} points")
+            self.stream_start()
+        else:
+            self.stream_emit()
 
     def fake_data(self):
         # Synthesize a chopped square wave with noise so fake mode exercises the
@@ -212,7 +286,11 @@ class SRS830Handler:
                             self.connect_and_configure()
                             self.connected_port = self.serialPort
                             self.status = f"Connected to SR830 on {self.serialPort}"
-                            self.state = common.SRS830_STATE_RUN_CAPTURING_DATA
+                            if common.SRS830_STREAM:
+                                self.stream_start()
+                                self.state = common.SRS830_STATE_RUN_STREAMING
+                            else:
+                                self.state = common.SRS830_STATE_RUN_CAPTURING_DATA
 
                     case common.SRS830_STATE_RUN_CAPTURING_DATA:
                         self.logger.info(f"Capturing data, thread cycle {self.i}")
@@ -239,6 +317,9 @@ class SRS830Handler:
 
                         # Back to capturing
                         self.state = common.SRS830_STATE_RUN_CAPTURING_DATA
+
+                    case common.SRS830_STATE_RUN_STREAMING:
+                        self.stream_poll()
 
                     case _:
                         self.logger.error(f"Fallback case hit for state {self.state}, killing srs830 thread")

@@ -24,6 +24,7 @@ SRS830_STATE_INIT = "SRS830_STATE_INIT"
 SRS830_STATE_WAITING_FOR_SERIAL_PORT = "SRS830_STATE_WAITING_FOR_SERIAL_PORT"
 SRS830_STATE_RUN_CAPTURING_DATA = "SRS830_STATE_RUN_CAPTURING_DATA"
 SRS830_STATE_RUN_TRANSFERRING_DATA = "SRS830_STATE_RUN_TRANSFERRING_DATA"
+SRS830_STATE_RUN_STREAMING = "SRS830_STATE_RUN_STREAMING"
 SRS830_STATE_RUN_ENDING = "SRS830_STATE_RUN_ENDING"
 
 # Commands are put on the command queue as (command, payload) tuples.
@@ -39,6 +40,22 @@ SRS830_RETRY_DELAY_S = 5  # Delay between serial connection attempts
 SRS830_SETTLE_TIME_S = 5  # Wait after configuring the instrument
 SRS830_SAVE_EACH_CAPTURE = False
 
+# Continuous capture: storage runs non-stop and new points are pulled with TRCB
+# while it fills, instead of alternating 1 s bursts with ~2 s transfers.
+# R and CH2 at 128 Hz is 1024 B/s, ~55% of the 19200-baud line (256 Hz for both
+# would need 109%). 128 Hz sampling changes the burst mean by ~0.1% vs 512 Hz at
+# 800 rpm (bench test 2026-11-13). Each SRS830_STREAM_BLOCK_S of samples goes to
+# the GUI as one "capture", and every sample is appended to <run_dir>/raw_stream.csv.
+# The 16383-point buffer (128 s at 128 Hz) is restarted every
+# SRS830_STREAM_RESTART_PTS points, leaving a sub-second gap.
+SRS830_STREAM = True
+SRS830_STREAM_SRAT_CODE = 11  # 11 = 128 Hz
+SRS830_STREAM_RATE_HZ = 128
+SRS830_STREAM_BLOCK_S = 1.0
+SRS830_STREAM_POLL_S = 0.5
+SRS830_STREAM_RESTART_PTS = 15000
+SRS830_STREAM_SAVE_RAW = True
+
 # CH2 capture: records the SR830 channel-2 buffer alongside R and adds a CH2
 # column to the reflectance file. What CH2 physically is depends on
 # SRS830_DDEF_CH2: "2,1,0" = theta, "2,3,0" = Aux In 3, "2,4,0" = Aux In 4.
@@ -51,9 +68,9 @@ SRS830_DDEF_CH2 = "2,3,0"
 SRS830_CH2_SIGN = -1
 
 # Instrument configuration - single source of truth for experiment parameters
-SRS830_REF_FREQ_HZ = 2345  # Internal reference frequency
+SRS830_REF_FREQ_HZ = 7350  # Internal reference frequency. Midway between 60 Hz harmonics; R scatter is flat 4.7-40 kHz, ~1.7x lower than at 2345 (2026-11-13)
 SRS830_AMPLITUDE_VRMS = 1  # Sine output amplitude (4.33 Vrms is the max before saturation on the SFU MOCVD system)
-SRS830_ISRC_CODE = 1  # Input: 0 = A (single-ended), 1 = A-B (differential, as wired)
+SRS830_ISRC_CODE = 0  # Input: 0 = A (single-ended), 1 = A-B. B is unconnected; A-B read R ~15% low and noisier (2026-11-13)
 SRS830_SENS_CODE = 24  # Sensitivity: 24 = 200 mV (higher number is higher range)
 SRS830_OFLT_CODE = 4  # Time constant: 4 = 1 ms (higher number is larger time constant)
 SRS830_SRAT_CODE = 13  # Sample rate code: 13 = 512 Hz, must match SRS830_CAPTURE_RATE_HZ

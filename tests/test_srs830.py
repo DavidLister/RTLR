@@ -101,3 +101,98 @@ def test_configure_selects_aux3_for_ch2(monkeypatch):
     # Default config must point CH2 at the pyrometer photodiode on Aux In 3
     assert common.SRS830_DDEF_CH2 == "2,3,0"
     assert common.SRS830_CAPTURE_CH2 is True
+
+
+class StreamingSerial:
+    """Fake SR830 whose buffer grows by `step` points per SPTS? query and
+    answers TRCB ? ch, start, k with the matching slice of known data."""
+
+    def __init__(self, r, ch2, step):
+        self.data = {1: np.asarray(r, dtype="<f4"), 2: np.asarray(ch2, dtype="<f4")}
+        self.step, self.stored, self.pending, self.sent = step, 0, b"", []
+
+    def write(self, data):
+        cmd = data.decode().strip()
+        self.sent.append(cmd)
+        if cmd == "SPTS ?":
+            self.stored = min(self.stored + self.step, len(self.data[1]))
+            self.pending += f"{self.stored}\r".encode()
+        elif cmd.startswith("TRCB ?"):
+            ch, start, k = (int(x) for x in cmd[6:].split(","))
+            self.pending += self.data[ch][start:start + k].tobytes()
+        elif cmd == "REST":
+            self.stored = 0
+
+    def read(self, n):
+        out, self.pending = self.pending[:n], self.pending[n:]
+        return out
+
+
+@pytest.fixture
+def stream_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "SRS830_FAKE_SERIAL", False)
+    monkeypatch.setattr(common, "SRS830_CAPTURE_CH2", True)
+    monkeypatch.setattr(common, "SRS830_CH2_SIGN", -1)
+    monkeypatch.setattr(common, "SRS830_STREAM_RATE_HZ", 128)
+    monkeypatch.setattr(common, "SRS830_STREAM_BLOCK_S", 1.0)
+    monkeypatch.setattr(common, "SRS830_STREAM_SAVE_RAW", True)
+    return tmp_path
+
+
+def make_stream_handler(con, run_dir):
+    import queue, threading
+    h = make_handler(con)
+    h.run_dir = str(run_dir)
+    h.queue_data_out = queue.Queue()
+    h.event_end = threading.Event()
+    h.logger = srs830.logger
+    h.stream_start()
+    return h
+
+
+def test_stream_emits_one_second_blocks_in_order(stream_config):
+    n = 128 * 3 + 40
+    r = np.arange(n) * 1e-4
+    con = StreamingSerial(r, -2 * r, step=50)  # reads straddle block boundaries
+    h = make_stream_handler(con, stream_config)
+    while h.stream_nread < n:
+        h.stream_read_new()
+        h.stream_emit()
+    blocks = [h.queue_data_out.get_nowait() for _ in range(h.queue_data_out.qsize())]
+    assert len(blocks) == 3                                   # 40 leftover points stay pending
+    got = np.concatenate([b[1][1] for b in blocks])
+    np.testing.assert_allclose(got, r[:384], rtol=1e-6)      # contiguous, nothing lost or repeated
+    np.testing.assert_allclose(np.concatenate([b[1][2] for b in blocks]), 2 * r[:384], rtol=1e-6)  # CH2 sign flipped
+    starts = [b[0] - h.stream_t0 for b in blocks]
+    np.testing.assert_allclose(starts, [0.0, 1.0, 2.0], atol=1e-9)
+    assert all(len(b[1][0]) == 128 for b in blocks)
+
+
+def test_stream_flush_emits_partial_block_only_if_half_full(stream_config):
+    con = StreamingSerial(np.ones(128 + 70), np.ones(128 + 70), step=200)
+    h = make_stream_handler(con, stream_config)
+    h.stream_read_new()
+    h.stream_emit(flush=True)
+    sizes = [len(h.queue_data_out.get_nowait()[1][1]) for _ in range(h.queue_data_out.qsize())]
+    assert sizes == [128, 70]
+
+
+def test_stream_raw_file_has_every_sample(stream_config):
+    n = 300
+    r = np.linspace(0.01, 0.02, n)
+    con = StreamingSerial(r, r, step=77)
+    h = make_stream_handler(con, stream_config)
+    while h.stream_nread < n:
+        h.stream_read_new()
+    raw = np.loadtxt(stream_config / "raw_stream.csv", delimiter=",", skiprows=1)
+    assert raw.shape == (n, 3)
+    np.testing.assert_allclose(np.diff(raw[:, 0]), 1 / 128, atol=1e-3)
+    np.testing.assert_allclose(raw[:, 1], r, rtol=1e-6)
+
+
+def test_stream_restart_refreshes_reference_phase_last(stream_config):
+    con = StreamingSerial(np.ones(10), np.ones(10), step=10)
+    make_stream_handler(con, stream_config)
+    i_freq = max(i for i, c in enumerate(con.sent) if c.startswith("FREQ"))
+    i_phas = max(i for i, c in enumerate(con.sent) if c.startswith("PHAS"))
+    assert i_phas > i_freq
