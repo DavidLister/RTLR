@@ -4,6 +4,11 @@ TEMPORARY notes on branch `debug-raw-capture`, for the agent running the cold
 test and for David. Written 2026-11-13. Delete the file once its points are
 folded into the code or the lab notebook.
 
+**Update, 15:15:** the program now defaults to continuous capture (128 Hz
+streaming), input A (ISRC 0) and a 7350 Hz reference. The leak numbers below
+were measured at 2345 Hz with the A−B input (which reads R about 15% low), so
+expect a different g. Re-measure it; don't assume 6.
+
 ## What we already know (from S211, S403 and today's bench readings)
 
 - **The pyrometer channel is not purely thermal.** Aux In 3 (CH2) =
@@ -47,8 +52,9 @@ the alignment first.
 
 ## Suggested protocol
 
-Hold each step for **≥ 60 s** (about 20 bursts at the new ~3 s TRCB cycle).
-**Log the wall-clock time of every change.** Keep SENS 24 and ISRC 1.
+Hold each step for **≥ 60 s** (about 60 one-second blocks when streaming).
+**Log the wall-clock time of every change** (the event field does this). Keep SENS 24
+and the new defaults (ISRC 0, 7350 Hz).
 Stay under SLVL 4.33 Vrms, the saturation note.
 
 1. **Baseline:** SLVL 1, 1000 RPM, 2 min.
@@ -68,34 +74,40 @@ Stay under SLVL 4.33 Vrms, the saturation note.
      the port.
 5. **Drift check:** back to SLVL 1, 1000 RPM, 1 min. Compare g with step 1.
 
-## What to record per burst
+## What gets recorded (debug build)
 
-This is what the `SRS830_DEBUG_RAW` recorder on this branch writes. It isn't
-on `main` yet, so if you're running `main`, capture the equivalent yourself.
+Streaming mode (the default):
+- `raw_stream.csv`: every sample at 128 Hz. Epoch time, R, and CH2
+  sign-corrected (×−1).
+- `raw/snapshots.csv`: once a second, SNAP of X, Y, θ, Aux In 3 (instrument
+  sign), Aux In 4 and ref freq, plus the **phase setting** (the knob's drift
+  target now), the buffer point count, and latched LIAS overload/unlock flags.
+- `raw/instrument.json`: every setting read back after configuring (now that
+  there's no `*RST`, this is the record of what the instrument really had),
+  plus `time_origin_epoch`. Reflectance-file and event times are epoch minus
+  this origin.
+- `<run>_events.csv`: typed process events on the reflectance-file clock.
 
-- Every raw sample: R, and CH2 **in the instrument's sign** (Aux In 3 reads negative).
-- Mean R, upper-median R, and mean CH2.
-- `SNAP ? 1,2,4,7,8,9` right after `PAUS`: X, Y, θ, Aux In 3, Aux In 4, ref freq.
-- `LIAS ?` per burst (it clears on read). Read it once after configuring so
-  stale bits don't show up.
-- The settings read back after configuring (FREQ, SLVL, SENS, ISRC, OFLT,
-  OFSL, OEXP, DDEF and so on).
+Burst mode (`SRS830_STREAM = False`) writes `raw/bursts.csv` and
+`raw/bursts_index.csv` instead of `raw_stream.csv`/`snapshots.csv`.
 
 ## Analysis to run on it
 
 - **Leak fit:** fit CH2 = a + g·R_mean per SLVL level. Compare g across RPM
   steps and between steps 1 and 5. Plot g × SLVL against SLVL: flat means H1.
-- **Inside each burst, take the FFT of R and CH2:**
+- **Take the FFT of R and CH2 from `raw_stream.csv` (e.g. 8 s windows):**
   - At the rotation line (16.7 Hz and harmonics), get the CH2/R gain and
     phase. That gives the DC-path low-pass corner.
-  - Look for a tone near **215 Hz** in CH2: 2345 Hz aliased by 512 Hz
-    sampling (2345 − 4×512 = 297, which folds to 215). If it's there,
+  - Look for a tone near **54 Hz** in CH2: 7350 Hz aliased by 128 Hz
+    sampling (7350 − 57×128 = 54). In burst mode at 512 Hz it lands at
+    182 Hz (7350 − 14×512). If it's there,
     Aux In 3 sees unfiltered laser modulation, and an RC low-pass before
     Aux In 3 would help.
-- **Burst-length truncation:** at 1000 RPM one rotation is 60 ms (30.7
-  samples). A ~0.9–1 s burst is about 15–17 rotations, not a whole number.
-  Compare each burst's mean over whole rotations with its full mean. If the
-  difference is above about 0.3% of R, trim bursts to whole rotations in software.
+- **Block-length truncation:** at 1000 RPM one rotation is 60 ms (7.7
+  samples at 128 Hz). The GUI's 1 s blocks hold 16.7 rotations, not a whole
+  number. From `raw_stream.csv`, compare means over whole rotations with
+  1 s block means. If the difference is above about 0.3% of R, average over
+  whole rotations in software.
 - **Aux In resolution:** take the smallest CH2 step from a histogram. S211
   showed 0.488 mV, against the SR830's nominal ~0.33 mV.
 
@@ -113,7 +125,7 @@ on `main` yet, so if you're running `main`, capture the equivalent yourself.
 - **H3 (electrical):** fix it in hardware (shielding or filtering on Aux In 3).
   Leak subtraction against R would only be approximate.
 - **g depends on RPM:** use burst means over whole rotations.
-- **The 215 Hz alias is present:** add an RC low-pass (corner a few Hz to
+- **The modulation alias (54 Hz when streaming) is present:** add an RC low-pass (corner a few Hz to
   ~20 Hz) before Aux In 3.
 
 ## Growth-run checklist (debug build, branch `debug-raw-capture`)
