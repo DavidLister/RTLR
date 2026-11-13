@@ -156,6 +156,11 @@ class AnalysisController:
                 self.status = "Calibrate reflectance before setting T reference"
             return
         sig = float(np.median([h[2] for h in self._recent()]))
+        if not sig > 0:
+            with self.lock:
+                self.status = (f"T reference needs a positive radiometric CH2 signal "
+                               f"(got {sig:.3g}) - enable SRS830_CAPTURE_CH2 with an aux input")
+            return
         refl = float(np.median([h[1] for h in self._recent()])) / self.A
         self.pyro_cal = analysis.PyroCalibration(temp_c=temp_c, signal=sig,
                                                  reflectance=refl)

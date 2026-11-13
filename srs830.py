@@ -115,7 +115,7 @@ class SRS830Handler:
         send_command(self.ser, "FMOD 1")  # Internal frequency reference
         send_command(self.ser, f"FREQ {common.SRS830_REF_FREQ_HZ}")
         send_command(self.ser, f"SLVL {common.SRS830_AMPLITUDE_VRMS}")
-        send_command(self.ser, "ISRC 0")  # Single-ended voltage input
+        send_command(self.ser, f"ISRC {common.SRS830_ISRC_CODE}")  # Input configuration
         send_command(self.ser, "IGND 1")  # Ground the PD
         send_command(self.ser, "ICPL 0")  # AC couple the input
         send_command(self.ser, "RMOD 1")  # Normal reserve
@@ -126,6 +126,9 @@ class SRS830Handler:
         send_command(self.ser, f"SRAT {common.SRS830_SRAT_CODE}")
         send_command(self.ser, "SEND 0")  # Single shot capture
         send_command(self.ser, "TSTR 0")  # Disable hardware trigger
+        # Remote mode: front panel (incl. the drifting knob) is disabled while
+        # the program runs, but the Local key still works as an escape hatch.
+        send_command(self.ser, "LOCL 1")
         self.wait(common.SRS830_SETTLE_TIME_S)  # Wait for settings to take effect
 
     def transfer_data(self):
@@ -265,6 +268,10 @@ class SRS830Handler:
     def end(self):
         self.logger.info("Ending SRS830Handler")
         if self.ser is not None:
+            try:
+                send_command(self.ser, "LOCL 0")  # Hand the front panel back
+            except (serial.SerialException, OSError) as err:
+                self.logger.warning(f"Could not return SR830 to local mode: {err}")
             self.ser.close()
             self.ser = None
 

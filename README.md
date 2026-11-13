@@ -14,7 +14,9 @@ python rtlr.py
 ```
 
 Configuration lives in `common.py`:
-- `SRS830_COM_PORT` — serial port the SR830 is connected to (e.g. `COM4`)
+- `SRS830_COM_PORT` — serial port the SR830 is connected to (`/dev/ttyUSB0`
+  for the USB-serial adapter on Linux, `COM4`-style on Windows; on Linux the
+  user must be in the `dialout` group)
 - `SRS830_CAPTURE_TIME_S` — burst capture length
 - Instrument settings (reference frequency, sensitivity, time constant, etc.)
 - `SRS830_CAPTURE_CH2` — also record the SR830 channel-2 buffer (theta or an

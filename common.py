@@ -18,7 +18,7 @@ CALC_TYPE = CALC_UPPER_MEDIAN
 WINDOW_UPDATE_RATE_MS = 500  # ms
 
 # SRS830
-SRS830_CAPTURE_TIME_S = 10  # s
+SRS830_CAPTURE_TIME_S = 1  # s - ASCII transfer is ~7 ms/point at 19200 baud, so 1 s gives a point every ~4.5 s (~8 s with CH2)
 SRS830_STATE_INIT = "SRS830_STATE_INIT"
 SRS830_STATE_WAITING_FOR_SERIAL_PORT = "SRS830_STATE_WAITING_FOR_SERIAL_PORT"
 SRS830_STATE_RUN_CAPTURING_DATA = "SRS830_STATE_RUN_CAPTURING_DATA"
@@ -31,7 +31,7 @@ SRS830_COMMAND_RAISE_END_FLAG = "SRS830_COMMAND_RAISE_END_FLAG"
 SRS830_COMMAND_SET_SERIAL_PORT = "SRS830_COMMAND_SET_SERIAL_PORT"  # Payload is a string with the port name
 SRS830_COMMAND_CLOSE_SERIAL_PORT = "SRS830_COMMAND_CLOSE_SERIAL_PORT"
 
-SRS830_COM_PORT = "COM4"
+SRS830_COM_PORT = "/dev/ttyUSB0"  # Prolific USB-serial adapter on the Fedora lab computer (was "COM4" on Windows)
 SRS830_BAUD = 19200
 SRS830_TIMEOUT_S = 5  # Inter-byte timeout - only trips after the line goes silent this long mid-response
 SRS830_RETRY_DELAY_S = 5  # Delay between serial connection attempts
@@ -47,7 +47,8 @@ SRS830_DDEF_CH2 = "2,1,0"
 
 # Instrument configuration - single source of truth for experiment parameters
 SRS830_REF_FREQ_HZ = 2345  # Internal reference frequency
-SRS830_AMPLITUDE_VRMS = 5  # Sine output amplitude
+SRS830_AMPLITUDE_VRMS = 1  # Sine output amplitude (4.33 Vrms is the max before saturation on the SFU MOCVD system)
+SRS830_ISRC_CODE = 1  # Input: 0 = A (single-ended), 1 = A-B (differential, as wired)
 SRS830_SENS_CODE = 24  # Sensitivity: 24 = 200 mV (higher number is higher range)
 SRS830_OFLT_CODE = 4  # Time constant: 4 = 1 ms (higher number is larger time constant)
 SRS830_SRAT_CODE = 13  # Sample rate code: 13 = 512 Hz, must match SRS830_CAPTURE_RATE_HZ

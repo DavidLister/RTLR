@@ -197,6 +197,31 @@ def test_wien_pyrometry_roundtrip():
     assert analysis.wien_temperature(s_hot, 0.10, cal) == pytest.approx(1000.0, rel=0.001)
 
 
+def test_wien_zero_reference_signal_is_nan():
+    cal = analysis.PyroCalibration(temp_c=900.0, signal=0.0, reflectance=0.10)
+    assert np.isnan(analysis.wien_temperature(0.0, 0.10, cal))
+
+
+def test_pyro_reference_refused_without_ch2(tmp_path):
+    # CH2 capture off -> ch2 is 0.0 on every point. "Set T ref" used to store a
+    # zero reference and then raise ZeroDivisionError on every later point,
+    # freezing all live readouts for the rest of the run.
+    from analysis_panel import AnalysisController
+    ctl = AnalysisController(str(tmp_path))
+    try:
+        for i in range(10):
+            ctl._handle(("point", 10.0 * i, 0.05, 0.0))
+        ctl._handle(("calibrate", 1050.0))
+        assert ctl.A is not None
+        ctl._handle(("pyro_ref", 1050.0))
+        assert ctl.pyro_cal is None
+        assert "CH2" in ctl.snapshot()["status"]
+        ctl._handle(("point", 100.0, 0.05, 0.0))  # must not raise
+        assert ctl.snapshot()["T"] is None
+    finally:
+        ctl.stop()
+
+
 def test_etch_rate_thermometer_anchor():
     T = analysis.etch_rate_temperature(materials.GAN_ETCH_RATE_ANCHOR_NM_S)
     assert T == pytest.approx(materials.GAN_ETCH_RATE_ANCHOR_TEMP_C, abs=0.5)

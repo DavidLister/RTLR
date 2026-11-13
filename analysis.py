@@ -610,6 +610,8 @@ def wien_temperature(signal, reflectance_abs, cal,
     """Emissivity-corrected temperature (C) via the Wien-form relation.
     Valid for opaque substrates (Si); on sapphire this is an effective,
     pocket-weighted temperature."""
+    if not cal.signal > 0:
+        return float("nan")
     T_cal = cal.temp_c + 273.15
     eps_ratio = (1.0 - cal.reflectance) / max(1.0 - reflectance_abs, 1e-6)
     arg = (signal / cal.signal) * eps_ratio
