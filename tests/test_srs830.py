@@ -196,3 +196,9 @@ def test_stream_restart_refreshes_reference_phase_last(stream_config):
     i_freq = max(i for i, c in enumerate(con.sent) if c.startswith("FREQ"))
     i_phas = max(i for i, c in enumerate(con.sent) if c.startswith("PHAS"))
     assert i_phas > i_freq
+
+
+def test_stream_restart_relocks_front_panel(stream_config):
+    con = StreamingSerial(np.ones(10), np.ones(10), step=10)
+    make_stream_handler(con, stream_config)
+    assert "LOCL 1" in con.sent

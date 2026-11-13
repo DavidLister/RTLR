@@ -188,9 +188,13 @@ class SRS830Handler:
         return timebase, data_r, data_ch2
 
     def refresh_reference(self):
-        # Undo any knob drift; phase last so the knob keeps acting on phase
+        # Undo any knob drift. A remote write does not change which parameter
+        # the knob acts on (that follows the front-panel display, which *RST
+        # resets to FREQ), so after the program starts press [Local] then
+        # [Phase] on the SR830; LOCL 1 here re-locks the panel at the next restart.
         send_command(self.ser, f"FREQ {common.SRS830_REF_FREQ_HZ}")
         send_command(self.ser, "PHAS 0")
+        send_command(self.ser, "LOCL 1")
 
     def stream_start(self):
         # (Re)start continuous storage from an empty buffer
