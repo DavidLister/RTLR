@@ -16,6 +16,7 @@ CALC_TYPE = CALC_UPPER_MEDIAN
 
 # Main Window
 WINDOW_UPDATE_RATE_MS = 500  # ms
+PLOT_CH2 = True  # Plot CH2 on a right-hand axis of the reflectance plot (when captured)
 
 # SRS830
 SRS830_CAPTURE_TIME_S = 1  # s - ASCII transfer is ~7 ms/point at 19200 baud, so 1 s gives a point every ~4.5 s (~8 s with CH2)
@@ -39,11 +40,15 @@ SRS830_SETTLE_TIME_S = 5  # Wait after configuring the instrument
 SRS830_SAVE_EACH_CAPTURE = False
 
 # CH2 capture: records the SR830 channel-2 buffer alongside R and adds a CH2
-# column to Reflectance.csv. What CH2 physically is depends on SRS830_DDEF_CH2:
-# "2,1,0" = theta (default), "2,3,0" = Aux In 3, "2,4,0" = Aux In 4 (DC
-# photodiode / blackbody channel lives on an aux input).
-SRS830_CAPTURE_CH2 = False
-SRS830_DDEF_CH2 = "2,1,0"
+# column to the reflectance file. What CH2 physically is depends on
+# SRS830_DDEF_CH2: "2,1,0" = theta, "2,3,0" = Aux In 3, "2,4,0" = Aux In 4.
+# The DC photodiode (pyrometry / blackbody) channel is wired to Aux In 3.
+SRS830_CAPTURE_CH2 = True
+SRS830_DDEF_CH2 = "2,3,0"
+# The Aux In 3 photodiode signal is inverted (raw S211 bursts were all
+# negative), so it's multiplied by this before saving/plotting/analysis.
+# A sign flip rather than abs() so noise near zero isn't rectified into an offset.
+SRS830_CH2_SIGN = -1
 
 # Instrument configuration - single source of truth for experiment parameters
 SRS830_REF_FREQ_HZ = 2345  # Internal reference frequency

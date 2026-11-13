@@ -149,7 +149,7 @@ class SRS830Handler:
         # CH2 (theta or aux input, per SRS830_DDEF_CH2) - if needed
         if common.SRS830_CAPTURE_CH2:
             send_command(self.ser, f"TRCA ? 2, 0, {points}")
-            data_ch2 = parse_trca(capture_until_eol(self.ser))
+            data_ch2 = common.SRS830_CH2_SIGN * parse_trca(capture_until_eol(self.ser))
         else:
             data_ch2 = np.zeros(timebase.shape)
 

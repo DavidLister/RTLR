@@ -46,6 +46,8 @@ SETTING_LAST_PORT = "serial/last_working_port"
 
 RUN_NAME_MAX_LEN = 64
 
+CH2_COLOUR = "#1f6fb4"  # blue: distinct from the black reflectance and red median/fit lines
+
 
 def sanitize_run_name(text):
     """Make a run name safe for file names on Windows and Linux: whitespace
@@ -170,6 +172,25 @@ class MainWindow(QMainWindow):
         self.curve_raw = self.plot_raw.plot([], [], pen=self.main_pen)
         self.curve_upper_median = self.plot_raw.plot([], [], pen=self.fit_pen)
         self.curve_lower_median = self.plot_raw.plot([], [], pen=self.fit_pen)
+
+        # CH2 (pyrometer photodiode) on its own right-hand axis, sharing the
+        # time axis, so both traces keep a readable scale
+        self.ch2 = []
+        self.show_ch2 = common.PLOT_CH2 and common.SRS830_CAPTURE_CH2
+        if self.show_ch2:
+            plot_item = self.plot_reflectance.getPlotItem()
+            self.ch2_view = pg.ViewBox()
+            plot_item.showAxis("right")
+            plot_item.scene().addItem(self.ch2_view)
+            right_axis = plot_item.getAxis("right")
+            right_axis.linkToView(self.ch2_view)
+            right_axis.setLabel("CH2 (V)", color=CH2_COLOUR)
+            right_axis.setPen(pg.mkPen(CH2_COLOUR))
+            right_axis.setTextPen(pg.mkPen(CH2_COLOUR))
+            self.ch2_view.setXLink(plot_item)
+            self.curve_ch2 = pg.PlotCurveItem(pen=pg.mkPen(CH2_COLOUR))
+            self.ch2_view.addItem(self.curve_ch2)
+            plot_item.vb.sigResized.connect(self._sync_ch2_view)
 
         self.layout.addWidget(self.plot_reflectance, 1, 0, 3, 4)
         self.layout.addWidget(self.plot_raw, 4, 0, 3, 4)
@@ -314,6 +335,11 @@ class MainWindow(QMainWindow):
                 self.logger.error("Data source thread did not shut down cleanly within 10s")
 
     # ---- display -------------------------------------------------------
+    def _sync_ch2_view(self):
+        main_vb = self.plot_reflectance.getPlotItem().vb
+        self.ch2_view.setGeometry(main_vb.sceneBoundingRect())
+        self.ch2_view.linkedViewChanged(main_vb, self.ch2_view.XAxis)
+
     def toggle_analysis_panel(self, expanded):
         self.analysis_caret.setArrowType(
             QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
@@ -356,22 +382,26 @@ class MainWindow(QMainWindow):
                     continue
 
             self.logger.debug(f"Reflectance value calculated: t={capture_time} R={reflectance}")
+            ch2_value = float(np.mean(raw_ch2))
             self.time.append(capture_time)
             self.reflectance.append(reflectance)
+            self.ch2.append(ch2_value)
             data_added = True
 
             if common.SAVE_CALCULATED_REFLECTANCE:
                 row = f"{capture_time},{reflectance}"
                 if common.SRS830_CAPTURE_CH2:
-                    row += f",{np.mean(raw_ch2)}"
+                    row += f",{ch2_value}"
                 with open(self.save_file_name, 'a') as f:
                     f.write(row + "\n")
 
             if self.analysis_panel is not None:
-                self.analysis_panel.feed(capture_time, reflectance, float(np.mean(raw_ch2)))
+                self.analysis_panel.feed(capture_time, reflectance, ch2_value)
 
         if data_added:
             self.curve_reflectance.setData(self.time, self.reflectance)
+            if self.show_ch2:
+                self.curve_ch2.setData(self.time, self.ch2)
             self.curve_raw.setData(self.raw_time, self.raw_voltage)
             ends = [self.raw_time[0], self.raw_time[-1]]
             self.curve_upper_median.setData(ends, [self.upper_median] * 2)

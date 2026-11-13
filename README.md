@@ -29,9 +29,12 @@ Configuration lives in `common.py`:
 - `SRS830_COM_PORT` — fallback serial port, used until a port has worked once
 - `SRS830_CAPTURE_TIME_S` — burst capture length
 - Instrument settings (reference frequency, sensitivity, time constant, etc.)
-- `SRS830_CAPTURE_CH2` — also record the SR830 channel-2 buffer (theta or an
-  aux input per `SRS830_DDEF_CH2`, e.g. the DC photodiode for pyrometry) as a
-  `CH2` column in `Reflectance.csv`
+- `SRS830_CAPTURE_CH2` / `SRS830_DDEF_CH2` — record the SR830 channel-2
+  buffer as a `CH2` column. Default is Aux In 3, the DC photodiode used for
+  pyrometry; `"2,1,0"` switches it to theta
+- `SRS830_CH2_SIGN` — the Aux In 3 photodiode signal is inverted, so CH2 is
+  multiplied by −1 before it is saved, plotted, or used for pyrometry
+- `PLOT_CH2` — show CH2 on a right-hand axis of the reflectance plot
 - `SRS830_FAKE_SERIAL = True` runs with synthesized data, no instrument needed
 
 Data is saved as `DATA/<timestamp>---<name>/<timestamp>---<name>_Reflectance.csv`
@@ -99,5 +102,4 @@ python tests/gui_harness.py      # scripted GUI run over a replay, screenshots +
 
 # Running Todo
     - GUI stop/restart of a capture without restarting the program, and choice of save path
-    - Merge remote fork's CH2/SRS830 config, then set SRS830_DDEF_CH2 to match
     - Dedicated GaN etch calibration run to anchor the etch-rate thermometer
