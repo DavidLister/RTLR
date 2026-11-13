@@ -202,3 +202,21 @@ def test_stream_restart_relocks_front_panel(stream_config):
     con = StreamingSerial(np.ones(10), np.ones(10), step=10)
     make_stream_handler(con, stream_config)
     assert "LOCL 1" in con.sent
+
+
+def test_configure_does_not_reset_and_clears_offsets(monkeypatch):
+    # *RST would put the reference display (and the failed knob) back on FREQ
+    con = ScriptedSerial({"*IDN ?": "Stanford_Research_Systems,SR830,s/n0,ver0"})
+    con.reset_input_buffer = lambda: None
+    monkeypatch.setattr(srs830.serial, "Serial", lambda *a, **k: con)
+    monkeypatch.setattr(common, "SRS830_SETTLE_TIME_S", 0)
+    h = make_handler(None)
+    h.serialPort = "fake"
+    h.logger = srs830.logger
+    import threading
+    h.event_end = threading.Event()
+    h.connect_and_configure()
+    assert "*RST" not in con.sent
+    for ch in (1, 2, 3):
+        assert f"OEXP {ch},0,0" in con.sent
+    assert {"HARM 1", "ILIN 0", "SYNC 0", "OFSL 1", "PHAS 0", "LOCL 1"} <= set(con.sent)

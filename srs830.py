@@ -147,8 +147,18 @@ class SRS830Handler:
             raise SRS830Error(f"Unexpected *IDN response: {res}")
 
         self.logger.info("Communication with SRS830 verified! Configuring instrument.")
-        send_command(self.ser, "*RST")
+        # No *RST: it resets the front-panel reference display to FREQ, and the
+        # failed knob drifts whatever that display shows. With the display left
+        # on [Phase] the drift only moves the phase, which R ignores. Instead,
+        # every setting *RST would have covered is set explicitly here.
         send_command(self.ser, "FMOD 1")  # Internal frequency reference
+        send_command(self.ser, "HARM 1")  # Detect at the fundamental
+        send_command(self.ser, "RSLP 0")  # Ref trigger slope (unused with internal ref)
+        send_command(self.ser, "ILIN 0")  # Line notch filters out
+        send_command(self.ser, "SYNC 0")  # Synchronous filter off
+        send_command(self.ser, "OFSL 1")  # 12 dB/oct output filter
+        for ch in (1, 2, 3):
+            send_command(self.ser, f"OEXP {ch},0,0")  # No offset or expand on X, Y, R
         send_command(self.ser, f"FREQ {common.SRS830_REF_FREQ_HZ}")
         send_command(self.ser, f"SLVL {common.SRS830_AMPLITUDE_VRMS}")
         send_command(self.ser, f"ISRC {common.SRS830_ISRC_CODE}")  # Input configuration
@@ -163,8 +173,6 @@ class SRS830Handler:
         send_command(self.ser, f"SRAT {srat}")
         send_command(self.ser, "SEND 0")  # Single shot capture
         send_command(self.ser, "TSTR 0")  # Disable hardware trigger
-        # The failed front-panel knob drifts whichever reference parameter was
-        # set last, so set the phase last: R doesn't depend on phase.
         send_command(self.ser, "PHAS 0")
         # Remote mode: front panel (incl. the drifting knob) is disabled while
         # the program runs, but the Local key still works as an escape hatch.
@@ -188,10 +196,9 @@ class SRS830Handler:
         return timebase, data_r, data_ch2
 
     def refresh_reference(self):
-        # Undo any knob drift. A remote write does not change which parameter
-        # the knob acts on (that follows the front-panel display, which *RST
-        # resets to FREQ), so after the program starts press [Local] then
-        # [Phase] on the SR830; LOCL 1 here re-locks the panel at the next restart.
+        # Undo any knob drift and re-lock the panel. Remote writes don't change
+        # which parameter the knob acts on - that follows the front-panel
+        # reference display, so leave it on [Phase] (tested 2026-11-13).
         send_command(self.ser, f"FREQ {common.SRS830_REF_FREQ_HZ}")
         send_command(self.ser, "PHAS 0")
         send_command(self.ser, "LOCL 1")
