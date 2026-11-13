@@ -48,6 +48,28 @@ def capture_until_eol(con):
         dout += data
 
 
+def capture_binary(con, n_bytes):
+    # Binary replies have no terminator, so read an exact byte count. pyserial's
+    # timeout caps each read() call, not the whole transfer, so loop: a long
+    # transfer only times out if the line goes silent for SRS830_TIMEOUT_S.
+    dout = bytearray()
+    while len(dout) < n_bytes:
+        data = con.read(n_bytes - len(dout))
+        if data == b"":
+            raise SRS830TimeoutError(f"Serial line silent for {common.SRS830_TIMEOUT_S}s after {len(dout)}/{n_bytes} bytes")
+        dout += data
+    return bytes(dout)
+
+
+def read_buffer(con, channel, points):
+    # TRCB returns IEEE-754 float32, little-endian, 4 bytes per point - 3.5x
+    # fewer bytes than TRCA's ASCII (~14 B/pt), and the RS232 line is the
+    # bottleneck. Matches TRCA to its 7 significant digits.
+    # (TRCL is no faster and truncates after ~66 bytes over RS232 on fw 0.341.)
+    send_command(con, f"TRCB ? {channel}, 0, {points}")
+    return np.frombuffer(capture_binary(con, 4 * points), dtype="<f4").astype(float)
+
+
 def save_csv(t, r, ch2, fname):
     n = min(len(t), len(r), len(ch2))  # Sometimes ch2 has fewer data points
     out = "Time (s),R (V),CH2\n"
@@ -56,11 +78,6 @@ def save_csv(t, r, ch2, fname):
 
     with open(fname, 'w') as f:
         f.write(out)
-
-
-def parse_trca(raw):
-    # TRCA responses are comma-separated ASCII floats with a trailing comma
-    return np.array([float(d) for d in str(raw, encoding="utf-8").split(",")[:-1]])
 
 
 class SRS830Handler:
@@ -111,6 +128,10 @@ class SRS830Handler:
                                  timeout=common.SRS830_TIMEOUT_S,
                                  baudrate=common.SRS830_BAUD)
         send_command(self.ser, "OUTX 0")  # Respond over RS232
+        # Drop any half-sent reply left over from before a reconnect - stray
+        # binary buffer bytes would otherwise corrupt the *IDN response.
+        self.wait(0.2)
+        self.ser.reset_input_buffer()
         send_command(self.ser, "*IDN ?")
         res = capture_until_eol(self.ser)
         if "SR830" not in res.decode("utf-8", errors="replace"):
@@ -142,14 +163,12 @@ class SRS830Handler:
         points = int(capture_until_eol(self.ser))
 
         # R data:
-        send_command(self.ser, f"TRCA ? 1, 0, {points}")
-        data_r = parse_trca(capture_until_eol(self.ser))
+        data_r = read_buffer(self.ser, 1, points)
         timebase = np.arange(len(data_r)) / common.SRS830_CAPTURE_RATE_HZ
 
         # CH2 (theta or aux input, per SRS830_DDEF_CH2) - if needed
         if common.SRS830_CAPTURE_CH2:
-            send_command(self.ser, f"TRCA ? 2, 0, {points}")
-            data_ch2 = common.SRS830_CH2_SIGN * parse_trca(capture_until_eol(self.ser))
+            data_ch2 = common.SRS830_CH2_SIGN * read_buffer(self.ser, 2, points)
         else:
             data_ch2 = np.zeros(timebase.shape)
 

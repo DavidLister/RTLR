@@ -19,7 +19,7 @@ WINDOW_UPDATE_RATE_MS = 500  # ms
 PLOT_CH2 = True  # Plot CH2 on a right-hand axis of the reflectance plot (when captured)
 
 # SRS830
-SRS830_CAPTURE_TIME_S = 1  # s - ASCII transfer is ~7 ms/point at 19200 baud, so 1 s gives a point every ~4.5 s (~8 s with CH2)
+SRS830_CAPTURE_TIME_S = 1  # s - binary (TRCB) transfer is ~2.1 ms/point at 19200 baud, so 1 s gives a point every ~2 s (~3 s with CH2)
 SRS830_STATE_INIT = "SRS830_STATE_INIT"
 SRS830_STATE_WAITING_FOR_SERIAL_PORT = "SRS830_STATE_WAITING_FOR_SERIAL_PORT"
 SRS830_STATE_RUN_CAPTURING_DATA = "SRS830_STATE_RUN_CAPTURING_DATA"
