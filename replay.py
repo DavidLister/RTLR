@@ -38,6 +38,8 @@ class ReplayHandler:
         self.replay_file = replay_file
         self.speed = max(speed, 0.01)
         self.event_end = threading.Event()
+        self.connected_port = None  # interface parity with SRS830Handler
+        self.status = f"Replaying {replay_file} at {self.speed:g}x"
         self.init_wall = time.time()
         self.rng = np.random.default_rng(1)
 
@@ -87,6 +89,7 @@ class ReplayHandler:
             burst = self._synth_burst(v, ch2)
             # recorded timestamp, mapped so MainWindow's (t - init_time) = t_rec
             self.queue_data_out.put([self.init_wall + t_rec, burst])
+        self.status = "Replay finished"
         logger.info("Replay finished")
 
     def stop(self):

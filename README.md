@@ -13,10 +13,20 @@ pip install -r requirements.txt
 python rtlr.py
 ```
 
+Nothing connects or logs until you:
+1. Pick the serial port from the dropdown (COM ports on Windows, `/dev/tty*`
+   on Linux; ↻ rescans, and you can type a path that isn't listed). It
+   defaults to the last port where an SR830 answered, remembered across
+   sessions. If the connection fails you can pick another port without
+   restarting; the selector locks once the instrument answers.
+2. Enter a run name (required; letters, digits, `.`, `_`, `-`, spaces become
+   `_`).
+3. Press **Start logging** (or Enter).
+
+On Linux the user must be in the `dialout` group to open the port.
+
 Configuration lives in `common.py`:
-- `SRS830_COM_PORT` — serial port the SR830 is connected to (`/dev/ttyUSB0`
-  for the USB-serial adapter on Linux, `COM4`-style on Windows; on Linux the
-  user must be in the `dialout` group)
+- `SRS830_COM_PORT` — fallback serial port, used until a port has worked once
 - `SRS830_CAPTURE_TIME_S` — burst capture length
 - Instrument settings (reference frequency, sensitivity, time constant, etc.)
 - `SRS830_CAPTURE_CH2` — also record the SR830 channel-2 buffer (theta or an
@@ -24,7 +34,8 @@ Configuration lives in `common.py`:
   `CH2` column in `Reflectance.csv`
 - `SRS830_FAKE_SERIAL = True` runs with synthesized data, no instrument needed
 
-Data is saved under `DATA/<timestamp>---<run info>/`.
+Data is saved as `DATA/<timestamp>---<name>/<timestamp>---<name>_Reflectance.csv`
+(plus `Analysis.csv` / `segments.json` if the analysis panel is used).
 
 ## Analysis panel
 
@@ -87,6 +98,6 @@ python tests/gui_harness.py      # scripted GUI run over a replay, screenshots +
 ```
 
 # Running Todo
-    - Gui to start/stop capture, choose file names and paths
+    - GUI stop/restart of a capture without restarting the program, and choice of save path
     - Merge remote fork's CH2/SRS830 config, then set SRS830_DDEF_CH2 to match
     - Dedicated GaN etch calibration run to anchor the etch-rate thermometer

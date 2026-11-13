@@ -26,6 +26,7 @@
 
 import os
 import csv
+import glob
 import json
 import logging
 import argparse
@@ -102,9 +103,13 @@ class RunData:
 
 
 def load_run(path):
-    """Load a Reflectance.csv (or a run directory containing one). NaN rows dropped."""
+    """Load a Reflectance.csv (or a run directory containing one; newer runs
+    name it <run_name>_Reflectance.csv). NaN rows dropped."""
     if os.path.isdir(path):
-        path = os.path.join(path, "Reflectance.csv")
+        matches = sorted(glob.glob(os.path.join(path, "*Reflectance.csv")))
+        if not matches:
+            raise FileNotFoundError(f"No *Reflectance.csv in {path}")
+        path = matches[0]
     t, refl, ch2 = [], [], []
     has_ch2 = False
     with open(path, encoding="utf-8-sig") as f:

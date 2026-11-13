@@ -78,9 +78,15 @@ class SRS830Handler:
         self.ser = None
         self.last_connect_attempt = None
 
+        # Read by the GUI thread (plain attribute reads, atomic in CPython).
+        # connected_port is set once *IDN? verifies an SR830 on that port.
+        self.connected_port = None
+        self.status = "Waiting for serial port" if serial_port is None else f"Connecting to {serial_port}"
+
         if common.SRS830_FAKE_SERIAL:
             self.state = common.SRS830_STATE_RUN_CAPTURING_DATA  # Skip Init
             self.fake_level = 1.0
+            self.status = "Fake serial data (no instrument)"
 
         # Flags
         self.event_end = threading.Event()
@@ -183,7 +189,10 @@ class SRS830Handler:
                             self.wait(0.5)
                         else:
                             self.last_connect_attempt = time.monotonic()
+                            self.status = f"Connecting to {self.serialPort}"
                             self.connect_and_configure()
+                            self.connected_port = self.serialPort
+                            self.status = f"Connected to SR830 on {self.serialPort}"
                             self.state = common.SRS830_STATE_RUN_CAPTURING_DATA
 
                     case common.SRS830_STATE_RUN_CAPTURING_DATA:
@@ -218,6 +227,8 @@ class SRS830Handler:
 
             except (serial.SerialException, OSError, ValueError, SRS830Error) as err:
                 self.logger.error(f"Serial error in state {self.state}: {err}")
+                self.connected_port = None
+                self.status = f"Serial error on {self.serialPort}: {err} - retrying"
                 self.flagSerialError = True
 
             # Handle any pending commands
@@ -240,6 +251,7 @@ class SRS830Handler:
                     if self.state == common.SRS830_STATE_WAITING_FOR_SERIAL_PORT:
                         self.serialPort = payload
                         self.last_connect_attempt = None
+                        self.status = f"Connecting to {self.serialPort}"
                         self.logger.info(f"Setting serial port to {self.serialPort}")
 
                 case common.SRS830_COMMAND_CLOSE_SERIAL_PORT:

@@ -15,9 +15,6 @@ import json
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import queue
-import datetime
-
 import numpy as np
 from PySide6 import QtCore
 from PySide6.QtWidgets import QApplication
@@ -46,21 +43,37 @@ SCRIPT = [
     (7600, "finish"),
 ]
 
-run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "---gui-harness"
-run_dir = os.path.join(SHOT_DIR, run_name)
-os.makedirs(run_dir, exist_ok=True)
+common.DATA_SUBPATH = SHOT_DIR  # run directories land next to the screenshots
 
-q_data = queue.Queue()
-q_cmd = queue.Queue()
-handler = replay.ReplayHandler(q_data, q_cmd, run_name, run_dir,
-                               replay_file=REPLAY, speed=SPEED)
+
+def replay_factory(data_q, cmd_q, run_name, run_dir, port):
+    return replay.ReplayHandler(data_q, cmd_q, run_name, run_dir,
+                                replay_file=REPLAY, speed=SPEED)
+
 
 app = QApplication([])
-window = rtlr.MainWindow(q_data, run_name, run_dir)
+window = rtlr.MainWindow(replay_factory, source_label=f"Replay: {os.path.basename(REPLAY)}")
 window.resize(1100, 850)
 window.show()
 
 state = {"idx": 0, "checks": [], "failed": False}
+
+# Run-name enforcement: nothing can start until a usable name is entered
+state["checks"].append(("Start disabled with empty name", not window.start_btn.isEnabled(), None))
+window.name_edit.setText("   ")
+state["checks"].append(("Start disabled with blank name", not window.start_btn.isEnabled(), None))
+window.start_logging()  # e.g. Enter pressed with a blank name
+state["checks"].append(("No handler started without a name", window.handler is None, None))
+window.name_edit.setText("gui harness")
+state["checks"].append(("Start enabled once named", window.start_btn.isEnabled(), None))
+window.start_btn.click()
+handler = window.handler
+run_dir = window.run_dir
+state["checks"].append(("Run dir includes name", run_dir.endswith("---gui_harness"), os.path.basename(run_dir)))
+state["checks"].append(("Reflectance file includes run name",
+                        os.path.basename(window.save_file_name) == os.path.basename(run_dir) + "_Reflectance.csv",
+                        os.path.basename(window.save_file_name)))
+state["checks"].append(("Name locked after start", not window.name_edit.isEnabled(), None))
 
 
 def shot(name):
@@ -159,11 +172,7 @@ watchdog.start(int(9000 / SPEED * 1000) + 120000)
 
 app.exec()
 
-window.timer.stop()
-if panel():
-    panel().shutdown()
-handler.stop()
-handler.join(timeout=5)
+window.shutdown()
 
 print("\n--- CHECKS ---")
 all_ok = not state["failed"] and state["checks"]
