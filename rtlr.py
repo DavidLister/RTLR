@@ -209,6 +209,15 @@ class MainWindow(QMainWindow):
         self.analysis_caret.toggled.connect(self.toggle_analysis_panel)
         self.layout.addWidget(self.analysis_caret, 7, 0, 1, 1)
 
+        # Event log: timestamped process notes (setpoints, thermocouple
+        # readings, valve changes) on the same clock as the reflectance file
+        self.events_file_name = None
+        self.event_edit = QLineEdit()
+        self.event_edit.setPlaceholderText("Event note, Enter to log (e.g. 'ramp to 1050 C', 'TC 1043 C', 'TMGa on')")
+        self.event_edit.setEnabled(False)
+        self.event_edit.returnPressed.connect(self.log_event)
+        self.layout.addWidget(self.event_edit, 7, 1, 1, 3)
+
         self.widget = QWidget()
         self.widget.setLayout(self.layout)
         self.setCentralWidget(self.widget)
@@ -301,11 +310,38 @@ class MainWindow(QMainWindow):
         self.start_btn.setText("Logging")
         self.analysis_caret.setEnabled(True)
         self.analysis_caret.setToolTip("")
+        self.events_file_name = os.path.join(run_dir, f"{run_name}_events.csv")
+        with open(self.events_file_name, 'w') as f:
+            f.write("Time (s),Local time,Event\n")
+        self.event_edit.setEnabled(True)
         self.setWindowTitle(f"RTLR - {run_name}")
 
-        self.init_time = time.time()
         self.handler = self.handler_factory(self.data_queue, self.command_queue, run_name, run_dir, port)
+        # Share the data source's clock so its timestamps (and any raw debug
+        # files) line up exactly with the reflectance file
+        self.init_time = getattr(self.handler, "time_origin", time.time())
         self.logger.info(f"Logging started: {self.save_file_name}" + (f" from {port}" if port else ""))
+
+    def log_event(self):
+        text = self.event_edit.text().strip()
+        if not text or self.events_file_name is None:
+            return
+        t = time.time() - self.init_time
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        safe = text.replace('"', "'")
+        try:
+            with open(self.events_file_name, 'a') as f:
+                f.write(f'{t:.1f},{stamp},"{safe}"\n')
+        except OSError as err:
+            self.statusBar().showMessage(f"Could not write event: {err}")
+            return
+        marker = pg.InfiniteLine(pos=t, angle=90, pen=pg.mkPen((110, 110, 110), style=QtCore.Qt.DashLine),
+                                 label=text, labelOpts={"position": 0.85, "color": (60, 60, 60),
+                                                        "fill": (240, 240, 240, 200),
+                                                        "anchors": [(0, 0.5), (0, 0.5)]})
+        self.plot_reflectance.addItem(marker)
+        self.event_edit.clear()
+        self.logger.info(f"Event at t={t:.1f}s: {text}")
 
     def poll_handler_status(self):
         if self.handler is None:

@@ -8,7 +8,9 @@
 # David Lister
 # July 2023
 
+import io
 import os
+import json
 import time
 import queue
 import logging
@@ -70,6 +72,114 @@ def read_buffer(con, channel, points, start=0):
     return np.frombuffer(capture_binary(con, 4 * points), dtype="<f4").astype(float)
 
 
+def query(con, command):
+    send_command(con, command)
+    return capture_until_eol(con).decode("utf-8", errors="replace").strip()
+
+
+# Settings read back into instrument.json when SRS830_DEBUG_RAW is on
+SETTINGS_QUERIES = ["*IDN ?", "FMOD ?", "FREQ ?", "SLVL ?", "PHAS ?", "HARM ?", "RSLP ?",
+                    "ISRC ?", "IGND ?", "ICPL ?", "ILIN ?", "SENS ?", "RMOD ?", "OFLT ?",
+                    "OFSL ?", "SYNC ?", "DDEF ? 1", "DDEF ? 2", "OEXP ? 1", "OEXP ? 2",
+                    "OEXP ? 3", "SRAT ?", "SEND ?", "TSTR ?", "LOCL ?"]
+
+# Instrument snapshot: X, Y, theta, Aux In 3, Aux In 4, reference frequency
+# (one SNAP), plus the phase setting - the failed front-panel knob drifts the
+# last-set reference parameter, which is now the phase
+SNAP_QUERY = "SNAP ? 1,2,4,7,8,9"
+SNAP_NAMES = ["X (V)", "Y (V)", "theta (deg)", "Aux In 3 raw (V)", "Aux In 4 (V)", "Ref freq (Hz)"]
+SNAPSHOT_NAMES = SNAP_NAMES + ["Phase setting (deg)"]
+
+# LIAS? latched status bits (cleared on read)
+LIAS_BITS = ["INPUT_OVLD", "FILTER_OVLD", "OUTPUT_OVLD", "UNLOCK", "RANGE_SWITCH", "TC_CHANGE", "TRIGGERED"]
+
+
+def decode_lias(value):
+    return "|".join(name for bit, name in enumerate(LIAS_BITS) if value & (1 << bit))
+
+
+class RawDebugRecorder:
+    """SRS830_DEBUG_RAW: writes debugging data to <run_dir>/raw/. Files are
+    created on first use, so each capture mode only produces its own:
+      instrument.json   settings read back at every (re)connect
+      snapshots.csv     streaming mode: periodic instrument snapshots
+      bursts.csv / bursts_index.csv   burst mode: every sample + per-burst summary
+    Write failures disable the recorder rather than disturbing acquisition."""
+
+    def __init__(self, run_dir, time_origin):
+        self.dir = os.path.join(run_dir, "raw")
+        self.time_origin = time_origin
+        self.n = 0
+        self.enabled = True
+        self.created = set()
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+        except OSError as err:
+            self._disable(err)
+
+    def _disable(self, err):
+        logger.error(f"Debug raw capture disabled: {err}")
+        self.enabled = False
+
+    def _append(self, name, header, text):
+        path = os.path.join(self.dir, name)
+        with open(path, "a") as f:
+            if name not in self.created:
+                self.created.add(name)
+                if f.tell() == 0:
+                    f.write(header + "\n")
+            f.write(text)
+
+    def _status_cells(self, values, lias):
+        values = list(values) if values is not None else [""] * len(SNAPSHOT_NAMES)
+        return values + ["" if lias is None else lias, "" if lias is None else decode_lias(lias)]
+
+    def write_settings(self, settings):
+        if not self.enabled:
+            return
+        try:
+            with open(os.path.join(self.dir, "instrument.json"), "w") as f:
+                json.dump(settings, f, indent=2)
+        except OSError as err:
+            self._disable(err)
+
+    def add_snapshot(self, now, values, lias, buffer_points):
+        if not self.enabled:
+            return
+        row = [f"{now - self.time_origin:.3f}",
+               datetime.datetime.fromtimestamp(now).isoformat(timespec="milliseconds"),
+               buffer_points] + self._status_cells(values, lias)
+        header = ",".join(["t (s)", "local time", "buffer points"] + SNAPSHOT_NAMES + ["LIAS", "LIAS flags"])
+        try:
+            self._append("snapshots.csv", header, ",".join(str(v) for v in row) + "\n")
+        except OSError as err:
+            self._disable(err)
+
+    def add_burst(self, start_time, timebase, data_r, ch2_raw, values=None, lias=None):
+        if not self.enabled:
+            return
+        self.n += 1
+        n = len(data_r) if ch2_raw is None else min(len(data_r), len(ch2_raw))
+        ch2 = np.full(n, np.nan) if ch2_raw is None else np.asarray(ch2_raw[:n])
+        r = np.asarray(data_r[:n])
+        upper = r[r > r.mean() + r.std() / 2] if n else r
+        row = [self.n, f"{start_time - self.time_origin:.3f}",
+               datetime.datetime.fromtimestamp(start_time).isoformat(timespec="milliseconds"), n,
+               f"{r.mean():.7g}" if n else "", f"{np.median(upper):.7g}" if len(upper) else "",
+               f"{np.mean(ch2):.7g}" if n and ch2_raw is not None else ""]
+        row += self._status_cells(values, lias)
+        index_header = ",".join(["burst", "t (s)", "start (local time)", "points", "R mean (V)",
+                                 "R upper median (V)", "CH2 raw mean (V)"] + SNAPSHOT_NAMES + ["LIAS", "LIAS flags"])
+        buf = io.StringIO()
+        np.savetxt(buf, np.column_stack([np.full(n, self.n), timebase[:n], r, ch2]),
+                   fmt=["%d", "%.6f", "%.7g", "%.7g"], delimiter=",")
+        try:
+            self._append("bursts.csv", "burst,t in burst (s),R (V),CH2 raw (V)", buf.getvalue())
+            self._append("bursts_index.csv", index_header, ",".join(str(v) for v in row) + "\n")
+        except OSError as err:
+            self._disable(err)
+
+
 def append_raw_stream(fname, t, r, ch2):
     # Continuous-capture raw log: absolute time (s since epoch), R (V), CH2 (V, sign-corrected)
     new = not os.path.exists(fname)
@@ -77,16 +187,6 @@ def append_raw_stream(fname, t, r, ch2):
         if new:
             f.write("Time (s since epoch),R (V),CH2 (V)\n")
         np.savetxt(f, np.column_stack([t, r, ch2]), fmt=["%.4f", "%.7g", "%.7g"], delimiter=",")
-
-
-def save_csv(t, r, ch2, fname):
-    n = min(len(t), len(r), len(ch2))  # Sometimes ch2 has fewer data points
-    out = "Time (s),R (V),CH2\n"
-    for i in range(n):
-        out += f"{t[i]},{r[i]},{ch2[i]}\n"
-
-    with open(fname, 'w') as f:
-        f.write(out)
 
 
 class SRS830Handler:
@@ -103,6 +203,16 @@ class SRS830Handler:
         self.serialPort = serial_port
         self.ser = None
         self.last_connect_attempt = None
+
+        # Burst start times are reported relative to this (the GUI adopts it
+        # as its own time origin, so raw debug files line up with the
+        # reflectance file exactly)
+        self.time_origin = time.time()
+        self.last_ch2_raw = None  # CH2 as the instrument reported it (before SRS830_CH2_SIGN)
+        self.debug = RawDebugRecorder(run_dir, self.time_origin) if common.SRS830_DEBUG_RAW else None
+        self.debug_extras = True  # per-burst SNAP/LIAS; switched off if they keep failing
+        self.debug_failures = 0
+        self.debug_last_snapshot = float("-inf")
 
         # Read by the GUI thread (plain attribute reads, atomic in CPython).
         # connected_port is set once *IDN? verifies an SR830 on that port.
@@ -178,6 +288,64 @@ class SRS830Handler:
         # the program runs, but the Local key still works as an escape hatch.
         send_command(self.ser, "LOCL 1")
         self.wait(common.SRS830_SETTLE_TIME_S)  # Wait for settings to take effect
+        if self.debug is not None:
+            self.record_instrument_settings()
+
+    def debug_query(self, command):
+        """Query for the debug recorder only. An odd reply or timeout must
+        never stop acquisition: flush the line, log, and return None."""
+        try:
+            return query(self.ser, command)
+        except SRS830TimeoutError as err:
+            self.logger.warning(f"Debug query {command!r} failed ({err}); continuing without it")
+            self.ser.reset_input_buffer()
+            return None
+
+    def debug_snapshot(self):
+        """(values, lias) for SNAPSHOT_NAMES, or Nones for anything that failed."""
+        if not self.debug_extras:
+            return None, None
+        snap = self.debug_query(SNAP_QUERY)
+        phas = self.debug_query("PHAS ?")
+        lias = self.debug_query("LIAS ?")
+        snap = snap.split(",") if snap else None
+        if snap is not None and len(snap) != len(SNAP_NAMES):
+            self.logger.warning(f"Unexpected SNAP reply {snap!r}")
+            snap = None
+        try:
+            lias = int(lias) if lias is not None else None
+        except ValueError:
+            self.logger.warning(f"Unexpected LIAS reply {lias!r}")
+            lias = None
+        if snap is None and lias is None and phas is None:
+            self.debug_failures += 1
+            if self.debug_failures >= 3:
+                self.logger.error("Debug SNAP/PHAS/LIAS failed 3 times; disabling them (data capture continues)")
+                self.debug_extras = False
+            return None, None
+        self.debug_failures = 0
+        values = (snap if snap is not None else [""] * len(SNAP_NAMES)) + [phas if phas is not None else ""]
+        return values, lias
+
+    def record_instrument_settings(self):
+        config = {k: getattr(common, k) for k in dir(common)
+                  if k.startswith("SRS830_") and not k.startswith(("SRS830_STATE_", "SRS830_COMMAND_"))}
+        readback = {q: self.debug_query(q) for q in SETTINGS_QUERIES}
+        lias = self.debug_query("LIAS ?")  # read clears the latch, so bursts start clean
+        try:
+            lias = int(lias)
+            lias_info = [lias, decode_lias(lias)]
+        except (TypeError, ValueError):
+            lias_info = [lias, "unreadable"]
+        self.debug.write_settings({
+            "connected": datetime.datetime.now().isoformat(timespec="seconds"),
+            "port": self.serialPort,
+            "config_sent": config,
+            "readback": readback,
+            "lias_at_connect": lias_info,
+            # rtlr times are (epoch - time_origin_epoch); raw_stream.csv uses epoch
+            "time_origin_epoch": self.time_origin,
+        })
 
     def transfer_data(self):
         send_command(self.ser, "SPTS ?")  # Request number of stored points
@@ -189,8 +357,10 @@ class SRS830Handler:
 
         # CH2 (theta or aux input, per SRS830_DDEF_CH2) - if needed
         if common.SRS830_CAPTURE_CH2:
-            data_ch2 = common.SRS830_CH2_SIGN * read_buffer(self.ser, 2, points)
+            self.last_ch2_raw = read_buffer(self.ser, 2, points)  # instrument sign, for the debug recorder
+            data_ch2 = common.SRS830_CH2_SIGN * self.last_ch2_raw
         else:
+            self.last_ch2_raw = None
             data_ch2 = np.zeros(timebase.shape)
 
         return timebase, data_r, data_ch2
@@ -250,6 +420,10 @@ class SRS830Handler:
         if self.event_end.is_set():
             return
         self.stream_read_new()
+        if self.debug is not None and time.monotonic() - self.debug_last_snapshot >= common.SRS830_DEBUG_SNAPSHOT_S:
+            self.debug_last_snapshot = time.monotonic()
+            values, lias = self.debug_snapshot()
+            self.debug.add_snapshot(time.time(), values, lias, self.stream_nread)
         if self.stream_nread >= common.SRS830_STREAM_RESTART_PTS:
             send_command(self.ser, "PAUS")
             self.stream_read_new()
@@ -315,16 +489,21 @@ class SRS830Handler:
 
                     case common.SRS830_STATE_RUN_TRANSFERRING_DATA:
                         self.logger.info(f"Transferring data, thread cycle {self.i}")
+                        snap, lias = None, None
                         if not common.SRS830_FAKE_SERIAL:
-                            timebase, data_r, data_theta = self.transfer_data()
+                            if self.debug is not None:
+                                # Right after PAUS, before the slow transfer
+                                snap, lias = self.debug_snapshot()
+                            timebase, data_r, data_ch2 = self.transfer_data()
+                            ch2_raw = self.last_ch2_raw
                         else:
-                            timebase, data_r, data_theta = self.fake_data()
+                            timebase, data_r, data_ch2 = self.fake_data()
+                            ch2_raw = data_ch2
 
-                        self.queue_data_out.put([start_time, (timebase, data_r, data_theta)])
+                        self.queue_data_out.put([start_time, (timebase, data_r, data_ch2)])
 
-                        if common.SRS830_SAVE_EACH_CAPTURE:
-                            fname = f"{self.i:06d}--" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".csv"
-                            save_csv(timebase, data_r, data_theta, os.path.join(self.run_dir, fname))
+                        if self.debug is not None:
+                            self.debug.add_burst(start_time, timebase, data_r, ch2_raw, snap, lias)
 
                         # Back to capturing
                         self.state = common.SRS830_STATE_RUN_CAPTURING_DATA

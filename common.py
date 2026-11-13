@@ -38,7 +38,20 @@ SRS830_BAUD = 19200
 SRS830_TIMEOUT_S = 5  # Inter-byte timeout - only trips after the line goes silent this long mid-response
 SRS830_RETRY_DELAY_S = 5  # Delay between serial connection attempts
 SRS830_SETTLE_TIME_S = 5  # Wait after configuring the instrument
-SRS830_SAVE_EACH_CAPTURE = False
+
+# Debug capture: extra data for studying the R and CH2 (pyrometer) channels
+# offline, in <run_dir>/raw/ (files appear only for the mode in use):
+#   instrument.json   *IDN, config sent, every setting read back, and the
+#                     epoch time origin (rtlr times = epoch - origin; the
+#                     streaming raw_stream.csv uses epoch seconds)
+#   snapshots.csv     streaming: every SRS830_DEBUG_SNAPSHOT_S, a SNAP of X, Y,
+#                     theta, Aux In 3, Aux In 4, ref freq, the phase setting
+#                     (knob drift), and latched LIA status (overload/unlock)
+#   bursts.csv, bursts_index.csv   burst mode: every sample (CH2 in instrument
+#                     sign) and per-burst summary with the same snapshot
+# Debug query failures are logged and skipped; they never stop acquisition.
+SRS830_DEBUG_RAW = True
+SRS830_DEBUG_SNAPSHOT_S = 1.0  # Streaming mode: instrument snapshot interval (~70 B each, ~4% of the line)
 
 # Continuous capture: storage runs non-stop and new points are pulled with TRCB
 # while it fills, instead of alternating 1 s bursts with ~2 s transfers.

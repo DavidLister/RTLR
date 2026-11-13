@@ -41,6 +41,7 @@ class ReplayHandler:
         self.connected_port = None  # interface parity with SRS830Handler
         self.status = f"Replaying {replay_file} at {self.speed:g}x"
         self.init_wall = time.time()
+        self.time_origin = self.init_wall  # MainWindow adopts this, so (t - origin) = t_rec exactly
         self.rng = np.random.default_rng(1)
 
         self.rows = []   # (t_recorded, reflectance, ch2 or None)

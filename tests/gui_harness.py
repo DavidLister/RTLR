@@ -56,7 +56,7 @@ window = rtlr.MainWindow(replay_factory, source_label=f"Replay: {os.path.basenam
 window.resize(1100, 850)
 window.show()
 
-state = {"idx": 0, "checks": [], "failed": False}
+state = {"idx": 0, "checks": [], "failed": False, "finished": False}
 
 # Run-name enforcement: nothing can start until a usable name is entered
 state["checks"].append(("Start disabled with empty name", not window.start_btn.isEnabled(), None))
@@ -74,6 +74,12 @@ state["checks"].append(("Reflectance file includes run name",
                         os.path.basename(window.save_file_name) == os.path.basename(run_dir) + "_Reflectance.csv",
                         os.path.basename(window.save_file_name)))
 state["checks"].append(("Name locked after start", not window.name_edit.isEnabled(), None))
+window.event_edit.setText("harness event, TC 1043 C")
+window.log_event()
+with open(window.events_file_name) as f:
+    event_rows = f.read().splitlines()
+state["checks"].append(("Event logged with time", len(event_rows) == 2 and event_rows[1].endswith('"harness event, TC 1043 C"'),
+                        event_rows[-1]))
 
 
 def shot(name):
@@ -130,6 +136,7 @@ def act(name):
 
 
 def finish():
+    state["finished"] = True
     snap = panel().controller.snapshot() if panel() else None
     seg_path = os.path.join(run_dir, "segments.json")
     ana_path = os.path.join(run_dir, "Analysis.csv")
@@ -167,7 +174,7 @@ driver.start(150)
 
 watchdog = QtCore.QTimer()
 watchdog.setSingleShot(True)
-watchdog.timeout.connect(lambda: (print("WATCHDOG TIMEOUT"), app.quit()))
+watchdog.timeout.connect(lambda: (print("WATCHDOG TIMEOUT"), state.update(failed=True), app.quit()))
 watchdog.start(int(9000 / SPEED * 1000) + 120000)
 
 app.exec()
@@ -175,6 +182,7 @@ app.exec()
 window.shutdown()
 
 print("\n--- CHECKS ---")
+state["checks"].append(("Replay ran to the end of the script", state["finished"], None))
 all_ok = not state["failed"] and state["checks"]
 for name, ok, val in state["checks"]:
     print(f"{'PASS' if ok else 'FAIL'}: {name}" + (f" (got {val})" if val is not None else ""))

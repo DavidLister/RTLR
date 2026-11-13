@@ -2,7 +2,10 @@
 # Run with: pytest tests/ -v
 
 import os
+import csv
 import sys
+import json
+import time
 
 import numpy as np
 import pytest
@@ -35,6 +38,10 @@ class ScriptedSerial:
         if cmd in self.responses:
             resp = self.responses[cmd]
             self.pending += resp if isinstance(resp, bytes) else resp.encode() + b"\r"
+        elif "?" in cmd and self.default is not None:
+            self.pending += self.default.encode() + b"\r"
+
+    default = None
 
     def read(self, n):
         if self.max_chunk is not None:
@@ -42,11 +49,18 @@ class ScriptedSerial:
         out, self.pending = self.pending[:n], self.pending[n:]
         return out
 
+    def close(self):
+        pass
+
+    def reset_input_buffer(self):
+        self.pending = b""
+
 
 def make_handler(con):
     # Bypass __init__ so no worker thread or real port is involved
     h = srs830.SRS830Handler.__new__(srs830.SRS830Handler)
     h.ser = con
+    h.debug = None  # SRS830_DEBUG_RAW recorder off unless a test sets one
     return h
 
 
@@ -101,6 +115,146 @@ def test_configure_selects_aux3_for_ch2(monkeypatch):
     # Default config must point CH2 at the pyrometer photodiode on Aux In 3
     assert common.SRS830_DDEF_CH2 == "2,3,0"
     assert common.SRS830_CAPTURE_CH2 is True
+
+
+def wait_for(pred, timeout=10.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def read_csv(path):
+    with open(path) as f:
+        return list(csv.reader(f))
+
+
+def test_debug_raw_records_real_instrument_path(tmp_path, monkeypatch):
+    # Full connect -> configure -> capture -> transfer loop against a scripted
+    # SR830, with SRS830_DEBUG_RAW on
+    monkeypatch.setattr(common, "SRS830_FAKE_SERIAL", False)
+    monkeypatch.setattr(common, "SRS830_CAPTURE_CH2", True)
+    monkeypatch.setattr(common, "SRS830_CH2_SIGN", -1)
+    monkeypatch.setattr(common, "SRS830_STREAM", False)  # burst mode
+    monkeypatch.setattr(common, "SRS830_DEBUG_RAW", True)
+    monkeypatch.setattr(common, "SRS830_SETTLE_TIME_S", 0)
+    monkeypatch.setattr(common, "SRS830_CAPTURE_TIME_S", 0.05)
+
+    def fake_port(*args, **kwargs):
+        con = ScriptedSerial({
+            "*IDN ?": "Stanford_Research_Systems,SR830,s/n0,ver1",
+            "FREQ ?": "2345",
+            "SPTS ?": "4",
+            "TRCB ? 1, 0, 4": f32([0.1, 0.2, 0.3, 0.4]),
+            "TRCB ? 2, 0, 4": f32([-0.5, -0.6, -0.7, -0.8]),
+            srs830.SNAP_QUERY: "1e-3,2e-4,10.5,-0.65,0.004,2345",
+            "LIAS ?": "5",  # INPUT_OVLD | OUTPUT_OVLD
+        })
+        con.responses["PHAS ?"] = "12.5"
+        con.default = "0"
+        return con
+    monkeypatch.setattr(srs830.serial, "Serial", fake_port)
+
+    import queue
+    q = queue.Queue()
+    h = srs830.SRS830Handler(q, queue.Queue(), "run", str(tmp_path), serial_port="FAKE")
+    raw = tmp_path / "raw"
+    try:
+        assert wait_for(lambda: (raw / "bursts_index.csv").exists()
+                        and len(read_csv(raw / "bursts_index.csv")) >= 3)
+    finally:
+        h.stop()
+        h.join(timeout=5)
+
+    # Pipeline still gets the sign-flipped CH2
+    _, (_, r, ch2) = q.get_nowait()
+    np.testing.assert_allclose(ch2, [0.5, 0.6, 0.7, 0.8])
+
+    settings = json.loads((raw / "instrument.json").read_text())
+    assert settings["readback"]["FREQ ?"] == "2345"
+    assert settings["readback"]["*IDN ?"].startswith("Stanford_Research_Systems,SR830")
+    assert settings["config_sent"]["SRS830_CH2_SIGN"] == -1
+
+    index = read_csv(raw / "bursts_index.csv")
+    header, first = index[0], dict(zip(index[0], index[1]))
+    assert all(len(row) == len(header) for row in index)
+    assert first["points"] == "4"
+    assert float(first["R mean (V)"]) == pytest.approx(0.25)
+    assert float(first["CH2 raw mean (V)"]) == pytest.approx(-0.65)  # instrument sign kept
+    assert first["Aux In 3 raw (V)"] == "-0.65"
+    assert first["LIAS flags"] == "INPUT_OVLD|OUTPUT_OVLD"
+    assert first["Phase setting (deg)"] == "12.5"
+    assert settings["time_origin_epoch"] == pytest.approx(h.time_origin)
+
+    bursts = read_csv(raw / "bursts.csv")
+    first_burst = [row for row in bursts[1:] if row[0] == "1"]
+    assert [float(row[3]) for row in first_burst] == [-0.5, -0.6, -0.7, -0.8]
+
+
+def test_debug_raw_in_fake_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(common, "SRS830_FAKE_SERIAL", True)
+    monkeypatch.setattr(common, "SRS830_DEBUG_RAW", True)
+    monkeypatch.setattr(common, "SRS830_CAPTURE_TIME_S", 0.1)
+    import queue
+    h = srs830.SRS830Handler(queue.Queue(), queue.Queue(), "run", str(tmp_path))
+    index_path = tmp_path / "raw" / "bursts_index.csv"
+    try:
+        assert wait_for(lambda: index_path.exists() and len(read_csv(index_path)) >= 3)
+    finally:
+        h.stop()
+        h.join(timeout=5)
+    index = read_csv(index_path)
+    assert all(len(row) == len(index[0]) for row in index)
+    n_points = sum(int(row[3]) for row in index[1:])
+    assert len(read_csv(tmp_path / "raw" / "bursts.csv")) - 1 >= n_points
+
+
+def test_debug_raw_off_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(common, "SRS830_FAKE_SERIAL", True)
+    monkeypatch.setattr(common, "SRS830_DEBUG_RAW", False)
+    monkeypatch.setattr(common, "SRS830_CAPTURE_TIME_S", 0.1)
+    import queue
+    q = queue.Queue()
+    h = srs830.SRS830Handler(q, queue.Queue(), "run", str(tmp_path))
+    try:
+        assert wait_for(lambda: q.qsize() >= 2)
+    finally:
+        h.stop()
+        h.join(timeout=5)
+    assert not (tmp_path / "raw").exists()
+
+
+def test_debug_queries_failing_never_stop_acquisition(tmp_path, monkeypatch):
+    # An instrument that never answers SNAP/LIAS/settings queries: bursts must
+    # keep flowing and raw data must still be recorded
+    monkeypatch.setattr(common, "SRS830_FAKE_SERIAL", False)
+    monkeypatch.setattr(common, "SRS830_CAPTURE_CH2", True)
+    monkeypatch.setattr(common, "SRS830_STREAM", False)  # burst mode
+    monkeypatch.setattr(common, "SRS830_DEBUG_RAW", True)
+    monkeypatch.setattr(common, "SRS830_SETTLE_TIME_S", 0)
+    monkeypatch.setattr(common, "SRS830_CAPTURE_TIME_S", 0.05)
+    monkeypatch.setattr(srs830.serial, "Serial", lambda *a, **k: ScriptedSerial({
+        "*IDN ?": "Stanford_Research_Systems,SR830,s/n0,ver1",
+        "SPTS ?": "2",
+        "TRCB ? 1, 0, 2": f32([0.1, 0.2]),
+        "TRCB ? 2, 0, 2": f32([-0.3, -0.4]),
+    }))
+    import queue
+    q = queue.Queue()
+    h = srs830.SRS830Handler(q, queue.Queue(), "run", str(tmp_path), serial_port="FAKE")
+    try:
+        assert wait_for(lambda: q.qsize() >= 5)
+    finally:
+        h.stop()
+        h.join(timeout=5)
+    assert h.debug_extras is False  # gave up on SNAP/LIAS after repeated failures
+    assert h.connected_port == "FAKE"  # never dropped into reconnect
+    index = read_csv(tmp_path / "raw" / "bursts_index.csv")
+    assert len(index) >= 6 and all(len(row) == len(index[0]) for row in index)
+    settings = json.loads((tmp_path / "raw" / "instrument.json").read_text())
+    assert settings["readback"]["FREQ ?"] is None
 
 
 class StreamingSerial:
@@ -220,3 +374,68 @@ def test_configure_does_not_reset_and_clears_offsets(monkeypatch):
     for ch in (1, 2, 3):
         assert f"OEXP {ch},0,0" in con.sent
     assert {"HARM 1", "ILIN 0", "SYNC 0", "OFSL 1", "PHAS 0", "LOCL 1"} <= set(con.sent)
+
+
+class StreamingSerialWithStatus(StreamingSerial):
+    """StreamingSerial that also answers the debug snapshot queries
+    (or stays silent for them when status=None)."""
+
+    def __init__(self, *args, status=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.status = status
+
+    def write(self, data):
+        cmd = data.decode().strip()
+        if self.status and cmd == srs830.SNAP_QUERY:
+            self.sent.append(cmd)
+            self.pending += b"1e-3,2e-4,10.5,-0.65,0.004,7350.1\r"
+        elif self.status and cmd == "PHAS ?":
+            self.sent.append(cmd)
+            self.pending += b"0.25\r"
+        elif self.status and cmd == "LIAS ?":
+            self.sent.append(cmd)
+            self.pending += b"8\r"
+        else:
+            super().write(data)
+
+    def reset_input_buffer(self):
+        self.pending = b""
+
+
+def make_stream_debug_handler(con, run_dir, monkeypatch):
+    monkeypatch.setattr(common, "SRS830_STREAM_POLL_S", 0)
+    monkeypatch.setattr(common, "SRS830_DEBUG_SNAPSHOT_S", 0)
+    h = make_stream_handler(con, run_dir)
+    h.time_origin = h.stream_t0
+    h.debug = srs830.RawDebugRecorder(str(run_dir), h.time_origin)
+    h.debug_extras, h.debug_failures, h.debug_last_snapshot = True, 0, float("-inf")
+    return h
+
+
+def test_stream_records_debug_snapshots(stream_config, monkeypatch):
+    n = 128 * 3
+    con = StreamingSerialWithStatus(np.ones(n), np.ones(n), step=64)
+    h = make_stream_debug_handler(con, stream_config, monkeypatch)
+    for _ in range(5):
+        h.stream_poll()
+    rows = read_csv(stream_config / "raw" / "snapshots.csv")
+    header, last = rows[0], dict(zip(rows[0], rows[-1]))
+    assert len(rows) == 6 and all(len(r) == len(header) for r in rows)
+    assert last["Ref freq (Hz)"] == "7350.1"
+    assert last["Phase setting (deg)"] == "0.25"
+    assert last["LIAS flags"] == "UNLOCK"
+    assert int(last["buffer points"]) == 5 * 64
+    assert not (stream_config / "raw" / "bursts.csv").exists()   # burst files only in burst mode
+    assert h.queue_data_out.qsize() == 2                          # 320 points -> two 1 s blocks
+
+
+def test_stream_continues_when_snapshot_queries_get_no_reply(stream_config, monkeypatch):
+    n = 128 * 4
+    r = np.arange(n) * 1e-4
+    con = StreamingSerialWithStatus(r, r, step=64, status=None)
+    h = make_stream_debug_handler(con, stream_config, monkeypatch)
+    for _ in range(8):
+        h.stream_poll()
+    blocks = [h.queue_data_out.get_nowait() for _ in range(h.queue_data_out.qsize())]
+    np.testing.assert_allclose(np.concatenate([b[1][1] for b in blocks]), r, rtol=1e-6)  # nothing lost
+    assert h.debug_extras is False

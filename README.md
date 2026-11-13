@@ -25,6 +25,11 @@ Nothing connects or logs until you:
 
 On Linux the user must be in the `dialout` group to open the port.
 
+During a run, type process events (setpoint changes, thermocouple readings,
+valve changes) into the event field under the plots and press Enter. Each is
+written with its time to `<timestamp>---<name>_events.csv`, on the same clock
+as the reflectance file, and marked on the plot.
+
 Configuration lives in `common.py`:
 - `SRS830_COM_PORT` — fallback serial port, used until a port has worked once
 - `SRS830_CAPTURE_TIME_S` — burst capture length
@@ -35,6 +40,10 @@ Configuration lives in `common.py`:
 - `SRS830_CH2_SIGN` — the Aux In 3 photodiode signal is inverted, so CH2 is
   multiplied by −1 before it is saved, plotted, or used for pyrometry
 - `PLOT_CH2` — show CH2 on a right-hand axis of the reflectance plot
+- `SRS830_DEBUG_RAW = True` keeps every raw burst sample plus per-burst
+  instrument snapshots (X, Y, θ, Aux In 3/4, ref freq, overload/unlock
+  status) and the read-back instrument settings in `<run_dir>/raw/` —
+  for debugging the R and pyrometer channels offline (~15 MB per 2 h)
 - `SRS830_FAKE_SERIAL = True` runs with synthesized data, no instrument needed
 
 Data is saved as `DATA/<timestamp>---<name>/<timestamp>---<name>_Reflectance.csv`
