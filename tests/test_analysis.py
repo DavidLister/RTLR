@@ -202,22 +202,17 @@ def test_wien_zero_reference_signal_is_nan():
     assert np.isnan(analysis.wien_temperature(0.0, 0.10, cal))
 
 
-def test_pyro_reference_refused_without_ch2(tmp_path):
-    # CH2 capture off -> ch2 is 0.0 on every point. "Set T ref" used to store a
-    # zero reference and then raise ZeroDivisionError on every later point,
-    # freezing all live readouts for the rest of the run.
+def test_panel_has_no_650nm_temperature_path(tmp_path):
+    # The panel used to compute T from CH2 with the 650 nm (1 - R) emissivity
+    # correction; the thermal signal is near-IR, so that path is gone and the
+    # controller must keep working on points without any pyrometer state.
     from analysis_panel import AnalysisController
     ctl = AnalysisController(str(tmp_path))
     try:
         for i in range(10):
             ctl._handle(("point", 10.0 * i, 0.05, 0.0))
-        ctl._handle(("calibrate", 1050.0))
-        assert ctl.A is not None
-        ctl._handle(("pyro_ref", 1050.0))
-        assert ctl.pyro_cal is None
-        assert "CH2" in ctl.snapshot()["status"]
-        ctl._handle(("point", 100.0, 0.05, 0.0))  # must not raise
-        assert ctl.snapshot()["T"] is None
+        ctl._handle(("pyro_ref", 1050.0))   # old message: ignored, must not raise
+        assert "T" not in ctl.snapshot()
     finally:
         ctl.stop()
 

@@ -25,6 +25,7 @@ import pyqtgraph as pg
 from serial.tools import list_ports
 import sys
 import common
+import pyrometer
 import srs830
 # analysis_panel (and scipy) are imported lazily on first caret expand
 
@@ -136,6 +137,14 @@ class MainWindow(QMainWindow):
         bar.addWidget(QLabel("Run name:"))
         bar.addWidget(self.name_edit, 1)
         bar.addWidget(self.start_btn)
+        bar.addSpacing(20)
+        # Live pyrometer readout (CH2 minus laser leak, ~1.2 um Wien, S432 scale)
+        self.pyro = None
+        self.pyro_file_name = None
+        self.pyro_label = QLabel("Pyro: -")
+        self.pyro_label.setMinimumWidth(330)
+        self.pyro_label.setStyleSheet("font-weight: bold")
+        bar.addWidget(self.pyro_label)
         self.layout.addLayout(bar, 0, 0, 1, 4)
 
         if self.port_selectable:
@@ -232,6 +241,7 @@ class MainWindow(QMainWindow):
         self.raw_voltage = []
         self.upper_median = None
         self.lower_median = None
+        self.laser_off = False
 
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_graphs)
@@ -315,6 +325,13 @@ class MainWindow(QMainWindow):
             f.write("Time (s),Local time,Event\n")
         self.event_edit.setEnabled(True)
         self.setWindowTitle(f"RTLR - {run_name}")
+        if common.PYRO_ENABLED and common.SRS830_CAPTURE_CH2:
+            self.pyro = pyrometer.LivePyrometer()
+            self.pyro_file_name = os.path.join(run_dir, f"{run_name}_pyrometer.csv")
+            with open(self.pyro_file_name, 'w') as f:
+                f.write(pyrometer.CSV_HEADER)
+        else:
+            self.pyro_label.setText("Pyro: off (needs CH2)")
 
         self.handler = self.handler_factory(self.data_queue, self.command_queue, run_name, run_dir, port)
         # Share the data source's clock so its timestamps (and any raw debug
@@ -381,7 +398,7 @@ class MainWindow(QMainWindow):
             QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
         if self.analysis_panel is None and expanded and self.run_dir is not None:
             from analysis_panel import AnalysisPanel
-            self.analysis_panel = AnalysisPanel(self.run_dir, self.plot_reflectance)
+            self.analysis_panel = AnalysisPanel(self.run_dir, self.plot_reflectance, pyro=self.pyro)
             self.layout.addWidget(self.analysis_panel, 8, 0, 1, 4)
             self.logger.info("Analysis panel created")
         if self.analysis_panel is not None:
@@ -395,13 +412,31 @@ class MainWindow(QMainWindow):
             capture_time = data[0] - self.init_time
             self.raw_time, self.raw_voltage, raw_ch2 = data[1]
 
-            r = self.raw_voltage
+            r = np.asarray(self.raw_voltage, dtype=float)
+            ch2_value = float(np.mean(raw_ch2))
+            if r.size == 0 or not np.all(np.isfinite(r)):
+                self.logger.warning(f"Capture at t={capture_time:.2f} is empty or has NaN/inf R, skipping")
+                continue
             mean = np.mean(r)
+            if self.pyro is not None:
+                self.update_pyrometer(capture_time, float(mean), ch2_value)
+            # Laser off or beam blocked: R sits at ~0 (below one buffer step).
+            # Say so once per occurrence instead of warning every second.
+            if mean < common.PYRO_LASER_OFF_R_V:
+                if not self.laser_off:
+                    self.laser_off = True
+                    self.logger.info(f"Laser off or beam blocked at t={capture_time:.1f}s (mean R "
+                                     f"{1e3 * mean:.3f} mV): reflectance paused, CH2 still recorded")
+                continue
+            if self.laser_off:
+                self.laser_off = False
+                self.logger.info(f"Laser back on at t={capture_time:.1f}s")
             stdev = np.std(r)
             upper = r[r > mean + stdev / 2]
             lower = r[r < mean - stdev / 2]
             if len(upper) == 0 or len(lower) == 0:
-                self.logger.warning(f"Capture at t={capture_time:.2f} has no modulation (flat signal?), skipping")
+                self.logger.warning(f"Capture at t={capture_time:.2f}: R is flat at {1e3 * mean:.3f} mV "
+                                    f"({len(np.unique(r))} distinct values), skipping")
                 continue
             self.upper_median = np.median(upper)
             self.lower_median = np.median(lower)
@@ -418,7 +453,6 @@ class MainWindow(QMainWindow):
                     continue
 
             self.logger.debug(f"Reflectance value calculated: t={capture_time} R={reflectance}")
-            ch2_value = float(np.mean(raw_ch2))
             self.time.append(capture_time)
             self.reflectance.append(reflectance)
             self.ch2.append(ch2_value)
@@ -445,6 +479,28 @@ class MainWindow(QMainWindow):
 
         if self.analysis_panel is not None and self.analysis_panel.isVisible():
             self.analysis_panel.refresh()
+
+    def update_pyrometer(self, t, r_mean, ch2):
+        T = self.pyro.update(t, r_mean, ch2)
+        try:
+            with open(self.pyro_file_name, 'a') as f:
+                f.write(pyrometer.csv_row(self.pyro, t))
+        except OSError as err:
+            self.logger.error(f"Could not append pyrometer file: {err}")
+        avg, sd, n = self.pyro.window_stats(60)
+        if np.isfinite(T):
+            text = f"Pyro: {T:.1f} C"
+            if n >= 10:
+                text += f"   (60 s: {avg:.1f} ± {sd:.1f})"
+        else:
+            text = f"Pyro: < {self._pyro_floor_c():.0f} C"
+        self.pyro_label.setText(text)
+        self.pyro_label.setToolTip(self.pyro.describe())
+
+    def _pyro_floor_c(self):
+        p = self.pyro
+        return pyrometer.wien_temperature_c(common.PYRO_MIN_SIGNAL_V, p.ref_signal_v,
+                                            p.ref_temp_c, p.lambda_eff_um)
 
 
 def build_source():

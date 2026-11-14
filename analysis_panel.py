@@ -2,7 +2,12 @@
 #
 # Optional GUI analysis panel for RTLR: substrate calibration, segment
 # marking (deposition / etch), live virtual-interface fitting readouts
-# (thickness, growth rate, roughness), and emissivity-corrected temperature.
+# (thickness, growth rate, roughness), and the live pyrometer controls.
+#
+# Temperature comes from pyrometer.LivePyrometer (owned by the main window):
+# CH2 minus the laser leak, Wien at ~1.2 um. The 650 nm (1 - R) emissivity
+# correction is not used: the thermal signal is near-IR light the 650 nm
+# bandpass does not block, so the 650 nm reflectance does not describe it.
 #
 # Nothing in this module is imported or instantiated until the user expands
 # the analysis caret in the main window, so the capture pipeline is untouched
@@ -52,12 +57,10 @@ class AnalysisController:
         self.active = None          # (Segment, SegmentAnalyzer)
         self.prev_by_material = {}
         self.roughened = False
-        self.pyro_cal = None
         self._csv_header_written = False
 
         # GUI-visible snapshot (guarded by lock)
         self.latest = None          # last FitResult
-        self.latest_T = None
         self.model_points = ([], [])
         self.status = "Panel active - calibrate on bare substrate"
 
@@ -74,9 +77,13 @@ class AnalysisController:
 
     def snapshot(self):
         with self.lock:
-            return {"latest": self.latest, "T": self.latest_T, "A": self.A,
+            return {"latest": self.latest, "A": self.A,
                     "model": self.model_points, "status": self.status,
                     "segments": list(self.segments)}
+
+    def set_status(self, text):
+        with self.lock:
+            self.status = text
 
     def stop(self):
         self.event_end.set()
@@ -104,8 +111,6 @@ class AnalysisController:
             self.substrate = msg[1]
         elif kind == "calibrate":
             self._calibrate(msg[1])
-        elif kind == "pyro_ref":
-            self._set_pyro_reference(msg[1])
         elif kind == "dep_start":
             self._start_segment("deposition", msg[1], msg[2])
         elif kind == "etch_start":
@@ -127,13 +132,9 @@ class AnalysisController:
             result = ana.add_point(t, v)
             if result is not None:
                 self._append_result_csv(seg, result)
-        T = None
-        if self.pyro_cal is not None and self.A:
-            T = analysis.wien_temperature(ch2, v / self.A, self.pyro_cal)
         with self.lock:
             if result is not None:
                 self.latest = result
-            self.latest_T = T
             if self.active is not None and self.active[1].results:
                 self.model_points = self.active[1].model_curve()
 
@@ -149,23 +150,6 @@ class AnalysisController:
             self.status = (f"Calibrated: {level:.4f} V on {self.substrate} "
                            f"(R={R:.4f}) -> A={self.A:.4f}")
         logger.info(self.status)
-
-    def _set_pyro_reference(self, temp_c):
-        if self.A is None or len(self.history) < 3:
-            with self.lock:
-                self.status = "Calibrate reflectance before setting T reference"
-            return
-        sig = float(np.median([h[2] for h in self._recent()]))
-        if not sig > 0:
-            with self.lock:
-                self.status = (f"T reference needs a positive radiometric CH2 signal "
-                               f"(got {sig:.3g}) - enable SRS830_CAPTURE_CH2 with an aux input")
-            return
-        refl = float(np.median([h[1] for h in self._recent()])) / self.A
-        self.pyro_cal = analysis.PyroCalibration(temp_c=temp_c, signal=sig,
-                                                 reflectance=refl)
-        with self.lock:
-            self.status = f"T reference set: {temp_c:.0f} C at CH2={sig:.3f} V"
 
     def _start_segment(self, kind, material, temp_c):
         if self.A is None:
@@ -234,9 +218,10 @@ class AnalysisController:
 class AnalysisPanel(QWidget):
     """The collapsible analysis panel. Create it lazily on first expand."""
 
-    def __init__(self, run_dir, plot_widget, parent=None):
+    def __init__(self, run_dir, plot_widget, pyro=None, parent=None):
         super().__init__(parent)
         self.controller = AnalysisController(run_dir)
+        self.pyro = pyro  # pyrometer.LivePyrometer from the main window, or None
         self.plot = plot_widget
         self.marker_items = []
         self.region_items = []
@@ -257,8 +242,17 @@ class AnalysisPanel(QWidget):
         self.calibrate_btn.clicked.connect(
             lambda: self.controller.command("calibrate", self.temp_spin.value()))
         self.pyro_btn = QPushButton("Set T ref")
-        self.pyro_btn.clicked.connect(
-            lambda: self.controller.command("pyro_ref", self.temp_spin.value()))
+        self.pyro_btn.setToolTip("Re-pin the pyrometer scale for this run so the current signal reads "
+                                 "the temperature in the box (e.g. the TC on a steady plateau).\n"
+                                 "Leave it alone to keep the fixed S432 scale, which is comparable between runs.")
+        self.pyro_btn.clicked.connect(self._set_pyro_reference)
+        self.leak_btn = QPushButton("Cal leak")
+        self.leak_btn.setToolTip("Measure the laser leak ratio g from the last 30 s.\n"
+                                 "Use only cold (below ~400 C) with the laser on and the beam on the detector.")
+        self.leak_btn.clicked.connect(self._calibrate_leak)
+        if pyro is None:
+            self.pyro_btn.setEnabled(False)
+            self.leak_btn.setEnabled(False)
 
         self.material_box = QComboBox()
         self.material_box.addItems(list(materials.FILMS))
@@ -287,6 +281,7 @@ class AnalysisPanel(QWidget):
         grid.addWidget(self.temp_spin, 0, 2)
         grid.addWidget(self.calibrate_btn, 0, 3)
         grid.addWidget(self.pyro_btn, 0, 4)
+        grid.addWidget(self.leak_btn, 0, 5)
         grid.addWidget(QLabel("Material:"), 1, 0)
         grid.addWidget(self.material_box, 1, 1)
         grid.addWidget(self.dep_start_btn, 1, 2)
@@ -298,6 +293,17 @@ class AnalysisPanel(QWidget):
         grid.addWidget(self.rough_label, 2, 4)
         grid.addWidget(self.temp_label, 2, 5)
         grid.addWidget(self.status_label, 3, 0, 1, 6)
+
+    # ---- pyrometer controls (GUI thread, like the pyrometer itself) --------
+    def _set_pyro_reference(self):
+        msg = self.pyro.set_reference(self.temp_spin.value())
+        logger.info(msg)
+        self.controller.set_status(msg)
+
+    def _calibrate_leak(self):
+        msg = self.pyro.calibrate_leak()
+        logger.info(msg)
+        self.controller.set_status(msg)
 
     # ---- data path ---------------------------------------------------------
     def feed(self, t, v, ch2):
@@ -328,8 +334,10 @@ class AnalysisPanel(QWidget):
                 self.rough_label.setText(f"Roughness: {r.sigma_nm:.0f} nm")
                 self.rough_label.setStyleSheet("")
                 self.rough_label.setToolTip("")
-        if snap["T"] is not None and np.isfinite(snap["T"]):
-            self.temp_label.setText(f"T: {snap['T']:.0f} C")
+        if self.pyro is not None and self.pyro.last is not None:
+            T = self.pyro.last[5]
+            self.temp_label.setText(f"T: {T:.1f} C" if np.isfinite(T) else "T: below range")
+            self.temp_label.setToolTip(self.pyro.describe())
         self.status_label.setText(snap["status"])
 
         tm, vm = snap["model"]

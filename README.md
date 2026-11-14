@@ -4,7 +4,7 @@ Real Time Laser Reflectometry (RTLR)
 Captures burst samples from an SRS SR830 lock-in amplifier over RS232, calculates
 reflectance from the chopped signal, and plots both in real time. An optional
 analysis panel fits the interference fringes live for growth rate, thickness,
-roughness, and emissivity-corrected temperature.
+roughness, and a live pyrometer temperature from the CH2 photodiode channel.
 
 ## Running
 
@@ -29,6 +29,55 @@ During a run, type process events (setpoint changes, thermocouple readings,
 valve changes) into the event field under the plots and press Enter. Each is
 written with its time to `<timestamp>---<name>_events.csv`, on the same clock
 as the reflectance file, and marked on the plot.
+
+## Pyrometer
+
+The top bar shows a live temperature from CH2 (Aux In 3) once logging starts.
+The latest 1 s value is followed by the mean ± sd over the last 60 s, which is
+the number to compare between runs on a bake plateau. Hover over it for the
+constants in use.
+
+How it works (`pyrometer.py`, settings `PYRO_*` in `common.py`):
+- **Laser leak:** the laser's own DC light reaches CH2 in proportion to R, so
+  the thermal signal is S = CH2 − a − g·mean(R). Typically g ≈ 6.4 at SLVL 1.
+  - g is measured automatically from the first 60 s of cold, laser-on data, so
+    start logging cold with the laser on. **Cal leak** in the analysis panel
+    re-measures it from the last 30 s (cold only).
+  - The dark offset a is updated from cold laser-off or beam-blocked stretches.
+- **The thermal light is near-IR, not 650 nm:** the 650 nm bandpass (Newport
+  10BPF10-650) doesn't block ~1 µm light. So S follows Wien at an effective
+  wavelength of 1.21 µm, fitted on S432 against the thermocouple. No
+  emissivity correction is applied, because the 650 nm R doesn't describe
+  near-IR light. On sapphire the reading is mostly the susceptor seen through
+  the wafer.
+- **Fixed scale:** every run is reported on the S432 scale (S = 1.090 V reads
+  1000.9 °C), so plateaus can be compared between runs. **Set T ref** in the
+  analysis panel re-pins the scale for one run, to the temperature in the box.
+- **Range:** blank below ~650 °C, where the leak uncertainty dominates. At
+  1000 °C the 1 s noise is ~0.15 K.
+- **A beam block while hot** gives a leak-free reading, since S = CH2 − a.
+- **Throughput:** a 1% change in optical throughput (alignment, window
+  coating) shifts the reading by ~1.4 K at 1020 °C. Compare the cold R on bare
+  sapphire between runs.
+- **Thermocouple lag:** the thermocouple lags the pyrometer by ~20 s on ramps.
+- **GaN films:** see the analysis-panel caveats below.
+- **Output:** every block is written to `<name>_pyrometer.csv` (R mean, CH2,
+  laser on, S, T, a, g).
+
+When the laser is off or the beam is blocked (mean R < 1 mV), the log says so
+once, and reflectance points pause until it's back. CH2 is still recorded.
+
+Offline, the same calculation runs on any recorded run, and can line it up with
+the reactor datalog (thermocouple = AI56):
+
+```
+python pyro_check.py DATA/<run> --datalog "<reactor datalog>.csv" --offset 147 --plot out.png
+```
+
+`--offset` is how far the reactor PC's clock is ahead of the RTLR PC, in
+seconds. Measure it each run, because the reactor clock drifts. The script
+prints the leak constants, the cold R, and every steady plateau with the
+pyrometer − thermocouple difference.
 
 Configuration lives in `common.py`:
 - `SRS830_COM_PORT` — fallback serial port, used until a port has worked once
@@ -57,8 +106,9 @@ when first opened). Workflow during a run:
 1. Select the substrate (Al2O3 / Si), set the temperature, press
    **Calibrate R** while the laser is on the bare substrate — this anchors
    volts to absolute reflectance.
-2. Optionally **Set T ref** at a trusted temperature to enable the
-   emissivity-corrected temperature readout (needs the CH2 DC channel).
+2. The panel's T readout is the live pyrometer (see above). **Set T ref**
+   re-pins its scale for this run, and **Cal leak** re-measures the laser leak
+   while cold.
 3. Select the material and press **Dep start** / **Dep end** (and
    **Etch start** / **Etch end** around anneals). Segments are shaded on the
    plot; green = deposition, orange = etch.
@@ -77,9 +127,17 @@ linear temperature correction). Physics caveats worth remembering:
 
 - Thickness/rate need visible fringes: after washout the readout freezes and
   flags rather than guessing.
-- On sapphire the 650 nm radiometric channel reads an effective pocket-weighted
-  temperature (wafer + susceptor); ε = 1 − R pyrometry is only strictly valid
-  on opaque substrates (Si).
+- The CH2 thermal signal is near-IR (~1.2 µm effective), so ε = 1 − R(650 nm)
+  can't correct it. A GaN film changes how much susceptor light gets through.
+  - A thin-film model predicts the reading swings between 0 and about −28 K
+    for the first ~0.5 µm, then settles to about −15 K once the film is
+    thicker than ~0.7 µm, as the broad detection band averages out the
+    interference.
+  - S403 shows a much weaker, smooth effect, and rough films (S432) show
+    almost none.
+  - Treat temperatures during growth as relative until this is calibrated
+    against a run with the thermocouple logged. Bake readings on bare
+    sapphire are unaffected.
 - The GaN etch-rate thermometer (`analysis.etch_rate_temperature`) uses a
   literature prefactor — calibrate with a dedicated NH3-off etch run before
   trusting absolute temperatures from it.

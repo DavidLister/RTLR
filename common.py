@@ -80,6 +80,24 @@ SRS830_DDEF_CH2 = "2,3,0"
 # A sign flip rather than abs() so noise near zero isn't rectified into an offset.
 SRS830_CH2_SIGN = -1
 
+# Live pyrometer (pyrometer.py): temperature from CH2 after removing the laser
+# leak, S = CH2 - a - g * mean(R). The 650 nm bandpass does not block the
+# near-IR, so the thermal signal is ~1 um light: Wien at an effective
+# wavelength fitted on S432 (2026-11-13, TC-referenced, 20 s TC lag removed).
+# The reference fixes the scale so runs are comparable: S_ref volts of thermal
+# signal = T_ref C. "Set T ref" in the analysis panel re-pins it for one run.
+PYRO_ENABLED = True  # needs SRS830_CAPTURE_CH2 with the photodiode on Aux In 3
+PYRO_LAMBDA_EFF_UM = 1.21
+PYRO_REF_SIGNAL_V = 1.090   # S432 HT deposition ...
+PYRO_REF_TEMP_C = 1000.9    # ... at this TC reading
+PYRO_LEAK_G = 6.4           # CH2 per volt of mean R (laser DC leak); S432 cold, wanders +-10%
+PYRO_DARK_V = -0.00066      # CH2 with the laser off (S432)
+PYRO_LASER_OFF_R_V = 0.001  # mean R below this = laser off / beam blocked
+PYRO_DARK_MAX_V = 0.005     # laser-off CH2 within this of the dark level updates it (cold only)
+PYRO_AUTO_LEAK_S = 60       # measure g from this many cold, laser-on seconds at the start
+PYRO_COLD_MAX_V = 0.015     # thermal signal below this counts as cold for the auto leak
+PYRO_MIN_SIGNAL_V = 0.03    # no temperature below this thermal signal (~650 C; leak error dominates)
+
 # Instrument configuration - single source of truth for experiment parameters
 SRS830_REF_FREQ_HZ = 7350  # Internal reference frequency. Midway between 60 Hz harmonics; R scatter is flat 4.7-40 kHz, ~1.7x lower than at 2345 (2026-11-13)
 SRS830_AMPLITUDE_VRMS = 1  # Sine output amplitude (4.33 Vrms is the max before saturation on the SFU MOCVD system)
