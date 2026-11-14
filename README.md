@@ -35,7 +35,9 @@ as the reflectance file, and marked on the plot.
 The top bar shows a live temperature from CH2 (Aux In 3) once logging starts.
 The latest 1 s value is followed by the mean ± sd over the last 60 s, which is
 the number to compare between runs on a bake plateau. Hover over it for the
-constants in use.
+constants in use. The temperature is also plotted below the reflectance plot,
+on the same time axis; event markers show on both, and blocks below range leave
+gaps.
 
 How it works (`pyrometer.py`, settings `PYRO_*` in `common.py`):
 - **Laser leak:** the laser's own DC light reaches CH2 in proportion to R, so

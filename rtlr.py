@@ -48,6 +48,7 @@ SETTING_LAST_PORT = "serial/last_working_port"
 RUN_NAME_MAX_LEN = 64
 
 CH2_COLOUR = "#1f6fb4"  # blue: distinct from the black reflectance and red median/fit lines
+PYRO_COLOUR = "#c4501b"  # orange-red: temperature, distinct from R (black) and CH2 (blue)
 
 
 def sanitize_run_name(text):
@@ -201,8 +202,33 @@ class MainWindow(QMainWindow):
             self.ch2_view.addItem(self.curve_ch2)
             plot_item.vb.sigResized.connect(self._sync_ch2_view)
 
+        # Pyrometer temperature, on its own plot (no third y-axis), sharing
+        # the reflectance plot's time axis so zoom/pan stay in step
+        self.plot_pyro = None
+        if common.PYRO_ENABLED and common.SRS830_CAPTURE_CH2:
+            self.plot_pyro = pg.PlotWidget()
+            self.plot_pyro.setBackground(self.colour)
+            self.plot_pyro.setTitle("Pyrometer (CH2 minus laser leak, ~1.2 um)")
+            self.plot_pyro.setLabel("bottom", "Time (s)")
+            self.plot_pyro.setLabel("left", "Temperature (C)")
+            self.plot_pyro.showGrid(y=True, alpha=0.25)
+            self.plot_pyro.setXLink(self.plot_reflectance)
+            self.curve_pyro = self.plot_pyro.plot([], [], pen=pg.mkPen(PYRO_COLOUR, width=1.5),
+                                                  connect="finite")
+        self.pyro_time = []
+        self.pyro_temp = []
+
         self.layout.addWidget(self.plot_reflectance, 1, 0, 3, 4)
-        self.layout.addWidget(self.plot_raw, 4, 0, 3, 4)
+        if self.plot_pyro is not None:
+            self.layout.addWidget(self.plot_pyro, 4, 0, 2, 4)
+            self.layout.addWidget(self.plot_raw, 6, 0, 1, 4)
+        else:
+            self.layout.addWidget(self.plot_raw, 4, 0, 3, 4)
+        # explicit stretch so heights follow the spans: 3:2:2 with the pyrometer plot, else 3:3
+        for row in range(1, 7):
+            self.layout.setRowStretch(row, 1)
+        if self.plot_pyro is not None:
+            self.layout.setRowStretch(6, 2)
 
         # Analysis panel: collapsed caret by default; the panel (and the
         # scipy-based fitting engine) is only created on first expand, and
@@ -357,6 +383,9 @@ class MainWindow(QMainWindow):
                                                         "fill": (240, 240, 240, 200),
                                                         "anchors": [(0, 0.5), (0, 0.5)]})
         self.plot_reflectance.addItem(marker)
+        if self.plot_pyro is not None:
+            self.plot_pyro.addItem(pg.InfiniteLine(pos=t, angle=90, pen=pg.mkPen(
+                (110, 110, 110), style=QtCore.Qt.DashLine)))
         self.event_edit.clear()
         self.logger.info(f"Event at t={t:.1f}s: {text}")
 
@@ -477,11 +506,21 @@ class MainWindow(QMainWindow):
             self.curve_upper_median.setData(ends, [self.upper_median] * 2)
             self.curve_lower_median.setData(ends, [self.lower_median] * 2)
 
+        if getattr(self, "pyro_curve_dirty", False):
+            self.pyro_curve_dirty = False
+            self.curve_pyro.setData(np.asarray(self.pyro_time), np.asarray(self.pyro_temp, dtype=float))
+
         if self.analysis_panel is not None and self.analysis_panel.isVisible():
             self.analysis_panel.refresh()
 
     def update_pyrometer(self, t, r_mean, ch2):
         T = self.pyro.update(t, r_mean, ch2)
+        self.pyro_time.append(t)
+        self.pyro_temp.append(T)
+        if self.plot_pyro is not None and np.isfinite(T):
+            # NaN (below range) blocks leave gaps; skip redraws until there is
+            # something to show so autorange never sees an all-NaN curve
+            self.pyro_curve_dirty = True
         try:
             with open(self.pyro_file_name, 'a') as f:
                 f.write(pyrometer.csv_row(self.pyro, t))
